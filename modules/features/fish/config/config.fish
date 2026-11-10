@@ -55,7 +55,6 @@ fzf_configure_bindings --directory=\ct --history=\cr --variables=\cv --git_statu
 # Aliases
 # ============================================================================
 alias e="$EDITOR"
-alias o="opencode"
 alias ssh="TERM=xterm-256color command ssh"
 
 bind \cl 'clear -x; commandline -f repaint'
