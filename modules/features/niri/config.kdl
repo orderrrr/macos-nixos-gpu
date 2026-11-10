@@ -1,5 +1,15 @@
 // On top of niri's default config.
 
+// The launcher sends physical key positions, so this matches the Mac's "Colemak DH ANSI".
+input {
+    keyboard {
+        xkb {
+            layout "us"
+            variant "colemak_dh"
+        }
+    }
+}
+
 binds {
     Mod+T hotkey-overlay-title="Open a Terminal: ghostty" { spawn "ghostty"; }
 }
