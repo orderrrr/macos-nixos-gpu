@@ -6,7 +6,7 @@
 [bar.default]
 start = ["launcher", "wallpaper", "workspaces"]
 center = ["clock"]
-end = ["media", "tray", "notifications", "clipboard", "volume", "control-center", "session"]
+end = ["tray", "notifications", "clipboard", "volume", "control-center", "session"]
 
 # Apps from the launcher run as their own transient units, so they survive Noctalia exiting
 # (5.4.1 can die on a Wayland protocol error, and restarting its unit would take them along).
