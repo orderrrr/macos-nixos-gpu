@@ -1,0 +1,20 @@
+# The Mac config's choices (nix-config dotfiles/config/ghostty), minus the macOS-only ones.
+# Keybinds stay ghostty's Linux defaults: the Mac file only lists the macOS defaults, which are
+# the same actions on super, and Super belongs to niri here.
+
+font-family = "IBM Plex Mono"
+font-size = 14
+bold-is-bright = true
+theme = dark:compline,light:lauds
+
+background-opacity = 0.98
+window-padding-x = 8
+window-padding-y = 8
+
+cursor-style-blink = true
+mouse-hide-while-typing = true
+mouse-shift-capture = true
+
+clipboard-read = allow
+desktop-notifications = false
+shell-integration-features = cursor,no-sudo,title
