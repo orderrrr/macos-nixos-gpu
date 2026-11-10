@@ -61,7 +61,7 @@ window-rule {
     draw-border-with-background false
     background-effect {
         blur true
-        noise 0.06
+        noise 0.1
     }
 }
 
@@ -69,7 +69,7 @@ layer-rule {
     match namespace="^noctalia-bar"
     background-effect {
         blur true
-        noise 0.06
+        noise 0.1
     }
 }
 
