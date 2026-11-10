@@ -12,3 +12,9 @@ end = ["tray", "notifications", "clipboard", "volume", "control-center", "sessio
 # (5.4.1 can die on a Wayland protocol error, and restarting its unit would take them along).
 [shell]
 launch_apps_as_systemd_services = true
+
+# Compline (palettes/Compline.json), the colours of ghostty, nvim and niri's focus ring.
+[theme]
+mode = "dark"
+source = "custom"
+custom_palette = "Compline"

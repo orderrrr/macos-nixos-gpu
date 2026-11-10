@@ -17,9 +17,18 @@ layout {
         width 3
         active-color "#d4ccb4"
         inactive-color "#3d424a"
+        urgent-color "#cdacac"
     }
     border {
         off
+    }
+    insert-hint {
+        color "#d4ccb480"
+    }
+    tab-indicator {
+        active-color "#d4ccb4"
+        inactive-color "#515761"
+        urgent-color "#cdacac"
     }
     shadow {
         on
@@ -38,6 +47,10 @@ window-rule {
 window-rule {
     match app-id="^zen" title="^Picture-in-Picture$"
     open-floating true
+}
+
+overview {
+    backdrop-color "#1a1d21"
 }
 
 spawn-at-startup "ghostty"
