@@ -21,6 +21,13 @@
         enable = true;
         systemd.enable = true; # started with niri's graphical-session.target
       };
+      # Draw with software GL (llvmpipe), not zink: zink presents through Venus's Vulkan WSI,
+      # which can still attach a frame after Noctalia destroys a surface (the launcher on close),
+      # and niri then disconnects it ("invalid object"). Its surfaces are cheap to draw on the CPU.
+      systemd.user.services.noctalia = {
+        environment.LIBGL_ALWAYS_SOFTWARE = "1";
+        serviceConfig.UnsetEnvironment = [ "MESA_LOADER_DRIVER_OVERRIDE" ];
+      };
       systemd.user.tmpfiles.rules = [
         "d %h/.config/noctalia"
         "L+ %h/.config/noctalia/config.toml - - - - ${./config.toml}"
