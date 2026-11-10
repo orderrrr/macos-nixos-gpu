@@ -6,9 +6,13 @@
   flake.modules.nixos.noctalia =
     { pkgs, ... }:
     let
-      # Dimmed toward black so it sits behind the windows instead of competing with them.
+      # The bright bands recoloured orange (a luminance mask keeps the navy, the blues and the
+      # halftone texture), then dimmed toward black so it sits behind the windows.
       dimmedWallpaper = pkgs.runCommand "wallpaper.jpg" { nativeBuildInputs = [ pkgs.imagemagick ]; } ''
-        magick ${./wallpaper.jpg} -fill black -colorize 35% $out
+        magick ${./wallpaper.jpg} \
+          \( +clone -colorspace gray +level-colors black,'#e8743c' \) \
+          \( -clone 0 -colorspace gray -level 40%,95% \) \
+          -composite -fill black -colorize 35% $out
       '';
       # Noctalia reads every *.toml in its config directory; this one only needs a store path.
       wallpaper = pkgs.writeText "wallpaper.toml" ''
