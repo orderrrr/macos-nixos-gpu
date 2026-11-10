@@ -17,6 +17,7 @@
       ghostty
       zen
       development
+      impermanence
     ];
   };
 

@@ -17,11 +17,34 @@ _: {
       boot.loader.grub.enable = false;
       boot.kernelParams = [ "console=hvc0" ];
 
+      # Impermanence (features/impermanence): `/` starts empty every boot. The disk holds the
+      # store (and the system profiles the kernel boots) and /persist.
       fileSystems."/" = {
+        device = "none";
+        fsType = "tmpfs";
+        options = [ "mode=755" ];
+      };
+      fileSystems."/disk" = {
         device = "/dev/disk/by-label/nixos";
         fsType = "ext4";
         autoResize = true; # the run app makes the disk bigger than the image
+        neededForBoot = true;
       };
+      fileSystems."/nix" = {
+        device = "/disk/nix";
+        fsType = "none";
+        options = [ "bind" ];
+        neededForBoot = true;
+      };
+      fileSystems."/persist" = {
+        device = "/disk/persist";
+        fsType = "none";
+        options = [ "bind" ];
+        neededForBoot = true;
+      };
+      # Builds in the default /tmp would fill RAM.
+      nix.settings.build-dir = "/nix/var/nix/builds";
+      systemd.tmpfiles.rules = [ "d /nix/var/nix/builds 0755 root root" ];
 
       # The repo on the Mac (the run app's --share), for nixos-rebuild in the guest.
       fileSystems."/etc/nixos" = {
@@ -31,11 +54,11 @@ _: {
 
       # First boot: register the image's store paths, as the sd-image module does.
       boot.postBootCommands = ''
-        if [ -f /nix-path-registration ]; then
-          ${config.nix.package.out}/bin/nix-store --load-db < /nix-path-registration
-          touch /etc/NIXOS
-          rm -f /nix-path-registration
+        if [ -f /disk/nix-path-registration ]; then
+          ${config.nix.package.out}/bin/nix-store --load-db < /disk/nix-path-registration
+          rm -f /disk/nix-path-registration
         fi
+        touch /etc/NIXOS # the tmpfs root starts without it
       '';
 
       # The image starts with this build as system generation 1, and the kernel boots whatever
@@ -44,7 +67,7 @@ _: {
         storePaths = [ toplevel ];
         volumeLabel = "nixos";
         populateImageCommands = ''
-          mkdir -p ./files/nix/var/nix/profiles
+          mkdir -p ./files/persist ./files/nix/var/nix/profiles ./files/nix/var/nix/builds
           ln -s ${toplevel} ./files/nix/var/nix/profiles/system-1-link
           ln -s system-1-link ./files/nix/var/nix/profiles/system
         '';

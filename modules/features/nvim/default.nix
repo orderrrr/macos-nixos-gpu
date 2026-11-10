@@ -1,8 +1,17 @@
-_: {
+{ config, ... }:
+{
   # config/ is a copy of nix-config's dotfiles/config/nvim.
   flake.modules.nixos.nvim =
     { pkgs, ... }:
     {
+      # vim.pack's plugins, compiled parsers and the lockfile it writes next to the config.
+      environment.persistence."/persist".users.${config.meta.username} = {
+        directories = [
+          ".local/share/nvim"
+          ".local/state/nvim"
+        ];
+        files = [ ".config/nvim/nvim-pack-lock.json" ];
+      };
       programs.neovim = {
         enable = true;
         defaultEditor = true;
