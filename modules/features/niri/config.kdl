@@ -1,0 +1,12 @@
+// On top of niri's default config.
+
+binds {
+    Mod+T hotkey-overlay-title="Open a Terminal: ghostty" { spawn "ghostty"; }
+}
+
+// The VM pointer is absolute, so leaving the window pins it to the top-left hot corner.
+gestures {
+    hot-corners {
+        off
+    }
+}

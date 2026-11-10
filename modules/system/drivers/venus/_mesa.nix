@@ -44,8 +44,8 @@ stdenv.mkDerivation {
   };
 
   patches = [
-    ./patches/mesa/0002-venus-avoid-null-ptr-dereference-for-zero-external-image-handleType.patch
-    ./patches/mesa/0003-venus-query-KosmicKrisp-external-legacy-tiling.patch
+    ./patches/0002-venus-avoid-null-ptr-dereference-for-zero-external-image-handleType.patch
+    ./patches/0003-venus-query-KosmicKrisp-external-legacy-tiling.patch
   ];
 
   # The meson hook builds with wrap_mode=nodownload: the wrap's directory has to be there already.
