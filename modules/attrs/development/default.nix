@@ -8,6 +8,7 @@
       direnv
       comma
       mangohud
+      claude-code
     ];
   };
 }
