@@ -15,6 +15,7 @@
       darkMode
       niri
       noctalia
+      mac-clipboard
       ghostty
       zen
       development

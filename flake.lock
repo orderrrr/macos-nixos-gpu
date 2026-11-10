@@ -170,8 +170,26 @@
         "import-tree": "import-tree",
         "nix-index-database": "nix-index-database",
         "nixpkgs": "nixpkgs",
+        "steamac": "steamac",
         "treefmt-nix": "treefmt-nix",
         "zen-browser": "zen-browser"
+      }
+    },
+    "steamac": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794135748,
+        "narHash": "sha256-zbLkHqmSXtftCNIXqBCy8xQC4FA+Z1XEPqQ5CY4J30k=",
+        "owner": "fxgl",
+        "repo": "steamac",
+        "rev": "407fb58b7459c65f49a7c65ddb875718a093f43b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "fxgl",
+        "repo": "steamac",
+        "rev": "407fb58b7459c65f49a7c65ddb875718a093f43b",
+        "type": "github"
       }
     },
     "treefmt-nix": {
