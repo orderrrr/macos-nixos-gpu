@@ -24,6 +24,7 @@
         gnumake
         ripgrep
         fd
+        wl-clipboard # the + register on Wayland
       ];
       # Entry by entry, since vim.pack writes its lockfile into ~/.config/nvim.
       systemd.user.tmpfiles.rules = [

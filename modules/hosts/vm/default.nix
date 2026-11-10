@@ -14,6 +14,7 @@
       cursor
       darkMode
       niri
+      noctalia
       ghostty
       zen
       development

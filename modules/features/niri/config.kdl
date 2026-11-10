@@ -10,8 +10,49 @@ input {
     }
 }
 
+// Look after vic/vix, in the compline colours ghostty and nvim use.
+layout {
+    gaps 10
+    focus-ring {
+        width 3
+        active-color "#d4ccb4"
+        inactive-color "#3d424a"
+    }
+    border {
+        off
+    }
+    shadow {
+        on
+        softness 30
+        spread 5
+        offset x=0 y=5
+        color "#0007"
+    }
+}
+
+window-rule {
+    geometry-corner-radius 12
+    clip-to-geometry true
+}
+
+window-rule {
+    match app-id="^zen" title="^Picture-in-Picture$"
+    open-floating true
+}
+
+spawn-at-startup "ghostty"
+
+hotkey-overlay {
+    skip-at-startup
+}
+
+screenshot-path "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
+
 binds {
     Mod+T hotkey-overlay-title="Open a Terminal: ghostty" { spawn "ghostty"; }
+    Mod+D hotkey-overlay-title="Run an Application: Noctalia" { spawn-sh "noctalia msg panel-toggle launcher"; }
+    // The Mac keyboard has no Print key.
+    Mod+Shift+S hotkey-overlay-title="Take a Screenshot" { screenshot; }
 }
 
 // The VM pointer is absolute, so leaving the window pins it to the top-left hot corner.
