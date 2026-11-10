@@ -8,7 +8,7 @@ bold-is-bright = true
 theme = dark:compline,light:lauds
 
 window-decoration = none
-background-opacity = 0.98
+background-opacity = 0.75 # niri blurs and grains behind it
 window-padding-x = 8
 window-padding-y = 8
 
