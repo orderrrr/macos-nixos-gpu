@@ -9,7 +9,7 @@ theme = dark:compline,light:lauds
 
 window-decoration = none
 # niri blurs and grains behind it (config.kdl). Ghostty has no end-of-line comments.
-background-opacity = 0.6
+background-opacity = 0.7
 window-padding-x = 8
 window-padding-y = 8
 

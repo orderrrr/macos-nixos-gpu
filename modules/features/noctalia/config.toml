@@ -7,7 +7,7 @@
 start = ["launcher", "wallpaper", "workspaces"]
 center = ["clock"]
 end = ["tray", "notifications", "clipboard", "volume", "control-center", "session"]
-background_opacity = 0.6 # niri blurs and grains behind it
+background_opacity = 0.7 # niri blurs and grains behind it
 
 # Apps from the launcher run as their own transient units, so they survive Noctalia exiting
 # (5.4.1 can die on a Wayland protocol error, and restarting its unit would take them along).
