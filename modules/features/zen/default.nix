@@ -11,7 +11,11 @@
     {
       environment.persistence."/persist".users.${config.meta.username}.directories = [ ".config/zen" ]; # the profile
       environment.systemPackages = [
-        inputs.zen-browser.packages.${pkgs.stdenv.hostPlatform.system}.default
+        # No "make Zen your default browser" prompt at every start. Set as an autoconfig pref: the
+        # flake drops extraPolicies before wrapFirefox, which then writes an empty policies.json.
+        (inputs.zen-browser.packages.${pkgs.stdenv.hostPlatform.system}.default.override {
+          extraPrefs = ''pref("browser.shell.checkDefaultBrowser", false);'';
+        })
       ];
     };
 }
