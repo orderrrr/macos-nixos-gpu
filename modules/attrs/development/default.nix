@@ -5,6 +5,9 @@
       git
       nix-ld
       nvim
+      direnv
+      comma
+      mangohud
     ];
   };
 }

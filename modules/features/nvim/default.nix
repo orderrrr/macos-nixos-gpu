@@ -1,5 +1,4 @@
-{ ... }:
-{
+_: {
   # config/ is a copy of nix-config's dotfiles/config/nvim.
   flake.modules.nixos.nvim =
     { pkgs, ... }:

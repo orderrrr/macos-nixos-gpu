@@ -1,5 +1,4 @@
-{ ... }:
-{
+_: {
   # config/ is a copy of nix-config's dotfiles/config/fish (os.fish = its os/linux.fish).
   flake.modules.nixos.fish =
     { pkgs, ... }:

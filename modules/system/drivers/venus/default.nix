@@ -1,5 +1,4 @@
-{ ... }:
-{
+_: {
   # GPU: Vulkan only through our Venus ICD; GL (niri, ghostty, zen) through zink on top of
   # it, since the host offers no virgl GL.
   flake.modules.nixos.venus =

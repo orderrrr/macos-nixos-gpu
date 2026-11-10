@@ -1,5 +1,4 @@
-{ ... }:
-{
+_: {
   # The Mac side of the VM, for a nix-darwin config to import (nix-config does, as
   # inputs.nixos-gpu-vm.modules.darwin.vmHost): the aarch64-linux builder the guest's kernel,
   # Mesa and rootfs build on. Changing the size needs a running builder, since the builder VM

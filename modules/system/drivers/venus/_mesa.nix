@@ -2,7 +2,6 @@
 # Mesa 26.2 lacks "venus: honor the virtio-gpu blob alignment" (MR !44783, first in 26.3), which
 # the 16K-page macOS host needs, so this is steamac's pin: that MR's commit plus its patches.
 {
-  lib,
   stdenv,
   fetchFromGitLab,
   meson,

@@ -1,5 +1,4 @@
-{ ... }:
-{
+_: {
   # What booting in steamac's libkrun launcher needs: no bootloader, root is the whole disk.
   flake.modules.nixos.vmConfiguration =
     {
