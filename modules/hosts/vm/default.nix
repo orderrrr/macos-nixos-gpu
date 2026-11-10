@@ -29,8 +29,8 @@
         set -eu
         bundle=${build.bundle}
         repo=''${NIXOS_GPU_VM:-$HOME/dev/prs/nixos-gpu-vm}
-        steamac=''${STEAMAC:-$HOME/opt/testing/steamac}
         state=''${XDG_DATA_HOME:-$HOME/.local/share}/nixos-gpu-vm
+        steamac=$state/steamac # fetched and built by build.sh
         disk=$state/disk.img
 
         mkdir -p "$state"
