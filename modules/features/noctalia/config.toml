@@ -1,0 +1,9 @@
+# Base config, on top of Noctalia's defaults. The settings UI saves its changes to the persisted
+# ~/.local/state/noctalia/settings.toml, which overrides this file.
+
+# Noctalia's default bar without network, bluetooth, brightness and battery: the VM has no
+# network manager, Bluetooth, backlight or battery.
+[bar.default]
+start = ["launcher", "wallpaper", "workspaces"]
+center = ["clock"]
+end = ["media", "tray", "notifications", "clipboard", "volume", "control-center", "session"]
