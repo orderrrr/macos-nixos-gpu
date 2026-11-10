@@ -1,7 +1,7 @@
-{ self, ... }:
+{ config, ... }:
 {
-  flake.nixosModules.core = {
-    imports = with self.nixosModules; [
+  flake.modules.nixos.core = {
+    imports = with config.flake.modules.nixos; [
       bootloader
       user
       nix

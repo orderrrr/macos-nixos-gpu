@@ -1,7 +1,7 @@
 { inputs, ... }:
 {
   # Not in nixpkgs; the flake repackages Zen's release builds.
-  flake.nixosModules.zen =
+  flake.modules.nixos.zen =
     { pkgs, ... }:
     {
       environment.systemPackages = [

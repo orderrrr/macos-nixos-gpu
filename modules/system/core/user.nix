@@ -1,8 +1,11 @@
-{ self, ... }:
+{ config, ... }:
+let
+  inherit (config.meta) username;
+in
 {
-  flake.nixosModules.user = {
-    imports = [ self.nixosModules.fish ];
-    users.users.nmcintosh = {
+  flake.modules.nixos.user = {
+    imports = [ config.flake.modules.nixos.fish ];
+    users.users.${username} = {
       isNormalUser = true;
       extraGroups = [
         "wheel"
@@ -12,6 +15,6 @@
       openssh.authorizedKeys.keyFiles = [ ./id_ed25519.pub ];
     };
     security.sudo.wheelNeedsPassword = false;
-    services.getty.autologinUser = "nmcintosh";
+    services.getty.autologinUser = username;
   };
 }

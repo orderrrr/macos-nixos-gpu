@@ -1,7 +1,7 @@
-{ ... }:
+{ config, ... }:
 {
   # The Mac's global git settings, with the personal address for this VM.
-  flake.nixosModules.git =
+  flake.modules.nixos.git =
     { pkgs, ... }:
     {
       programs.git = {
@@ -9,8 +9,7 @@
         lfs.enable = true;
         config = {
           user = {
-            name = "nmcintosh";
-            email = "nathanielstewartmcintosh@gmail.com";
+            inherit (config.meta) name email;
           };
           core = {
             autocrlf = "input";

@@ -1,7 +1,12 @@
-{ self, inputs, ... }:
+{
+  self,
+  inputs,
+  config,
+  ...
+}:
 {
   flake.nixosConfigurations.vm = inputs.nixpkgs.lib.nixosSystem {
-    modules = with self.nixosModules; [
+    modules = with config.flake.modules.nixos; [
       vmConfiguration
       core
       audio

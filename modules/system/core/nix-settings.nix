@@ -1,6 +1,6 @@
-{ ... }:
+{ config, ... }:
 {
-  flake.nixosModules.nix = {
+  flake.modules.nixos.nix = {
     nix = {
       settings = {
         experimental-features = [
@@ -9,7 +9,7 @@
         ];
         trusted-users = [
           "root"
-          "nmcintosh"
+          config.meta.username
         ];
       };
       # Each in-guest rebuild keeps its generation, and the disk file on the Mac only grows.

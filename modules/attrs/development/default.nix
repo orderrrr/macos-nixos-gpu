@@ -1,7 +1,7 @@
-{ self, ... }:
+{ config, ... }:
 {
-  flake.nixosModules.development = {
-    imports = with self.nixosModules; [
+  flake.modules.nixos.development = {
+    imports = with config.flake.modules.nixos; [
       git
       nix-ld
       nvim

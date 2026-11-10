@@ -1,7 +1,7 @@
 { ... }:
 {
   # config/ is a copy of nix-config's dotfiles/config/nvim.
-  flake.nixosModules.nvim =
+  flake.modules.nixos.nvim =
     { pkgs, ... }:
     {
       programs.neovim = {

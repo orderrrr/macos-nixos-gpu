@@ -1,6 +1,6 @@
 { ... }:
 {
-  flake.nixosModules.bootloader =
+  flake.modules.nixos.bootloader =
     { pkgs, ... }:
     let
       # kernel.config is steamac's guest/kernel/config fragments (libkrunfw base, Steam Frame

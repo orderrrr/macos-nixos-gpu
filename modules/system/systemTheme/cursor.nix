@@ -2,7 +2,7 @@
 {
   # niri loads the cursor theme named "default" (it ignores XCURSOR_THEME), so make that one
   # inherit Bibata; without any, it falls back to a tiny built-in cursor.
-  flake.nixosModules.cursor =
+  flake.modules.nixos.cursor =
     { pkgs, ... }:
     {
       environment.systemPackages = [

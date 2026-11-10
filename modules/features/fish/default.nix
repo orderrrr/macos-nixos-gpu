@@ -1,7 +1,7 @@
 { ... }:
 {
   # config/ is a copy of nix-config's dotfiles/config/fish (os.fish = its os/linux.fish).
-  flake.nixosModules.fish =
+  flake.modules.nixos.fish =
     { pkgs, ... }:
     {
       programs.fish.enable = true;

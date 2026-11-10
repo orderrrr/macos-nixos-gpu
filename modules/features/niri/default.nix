@@ -1,6 +1,6 @@
 { ... }:
 {
-  flake.nixosModules.niri =
+  flake.modules.nixos.niri =
     { pkgs, ... }:
     let
       # Only the one file, not niri's whole source tree, goes into the system.
