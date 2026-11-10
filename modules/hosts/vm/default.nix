@@ -7,9 +7,11 @@
       audio
       venus
       cursor
+      darkMode
       niri
       ghostty
       zen
+      development
     ];
   };
 

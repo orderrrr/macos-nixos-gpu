@@ -1,6 +1,7 @@
-{ ... }:
+{ self, ... }:
 {
   flake.nixosModules.user = {
+    imports = [ self.nixosModules.fish ];
     users.users.nmcintosh = {
       isNormalUser = true;
       extraGroups = [
