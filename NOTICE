@@ -1,0 +1,15 @@
+Parts of this repository come from steamac (https://github.com/fxgl/steamac),
+Copyright 2026 FX GAMES FZ LLC and the patch authors, under these licences:
+
+GPL-2.0-only (LICENSES/GPL-2.0-only.txt) - Linux kernel derivatives:
+  modules/system/core/patches/   (steamac guest/kernel/patches)
+  modules/system/core/kernel.config
+    (steamac guest/kernel/config fragments, resolved for this kernel version)
+  Patches keep the copyright of their authors as recorded in each patch.
+
+MIT (LICENSES/MIT.txt) - Mesa patches:
+  modules/system/drivers/venus/patches/   (steamac guest/mesa/patches)
+
+Apache-2.0 (LICENSES/Apache-2.0.txt) - adapted from steamac's build scripts:
+  modules/system/drivers/venus/_mesa.nix
+    (the Venus-only Mesa build of steamac guest/mesa/container/common.sh)
