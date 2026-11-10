@@ -56,12 +56,18 @@ overview {
 // Frosted glass: blur (of the wallpaper, niri's cheap "xray" default) plus grain behind the
 // semi-transparent terminal and bar. The focus ring isn't drawn behind ghostty, where it
 // would tint it.
+// Stronger than the default (passes 3, offset 3).
+blur {
+    passes 4
+    offset 5
+}
+
 window-rule {
     match app-id="^com\\.mitchellh\\.ghostty$"
     draw-border-with-background false
     background-effect {
         blur true
-        noise 0.1
+        noise 0.18
     }
 }
 
@@ -69,7 +75,7 @@ layer-rule {
     match namespace="^noctalia-bar"
     background-effect {
         blur true
-        noise 0.1
+        noise 0.18
     }
 }
 
