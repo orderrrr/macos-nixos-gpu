@@ -49,6 +49,9 @@
         serviceConfig = {
           ExecStart = "${agent}/bin/fx-progress-agent clipboard";
           Restart = "on-failure"; # it exits 0 by itself when the launcher has no clipboard port
+          # It probes every X display for SteamOS's gamescope, and that probe alone would make niri
+          # start Xwayland at login; hiding /tmp/.X11-unix leaves X to start for real X11 apps.
+          PrivateTmp = true;
           RestartSec = 2;
         };
       };

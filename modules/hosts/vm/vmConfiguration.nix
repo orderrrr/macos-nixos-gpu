@@ -3,6 +3,7 @@ _: {
   flake.modules.nixos.vmConfiguration =
     {
       config,
+      lib,
       pkgs,
       modulesPath,
       ...
@@ -83,5 +84,11 @@ _: {
       };
 
       services.openssh.enable = true; # the launcher forwards 127.0.0.1:2222 to the guest's :22
+
+      # Memory: no name-service cache daemon (its only plugins look up containers and the own
+      # hostname, which /etc/hosts has), and no login on hvc0, which the launcher only reads as a log.
+      services.nscd.enable = false;
+      system.nssModules = lib.mkForce [ ];
+      systemd.services."serial-getty@hvc0".enable = false;
     };
 }
