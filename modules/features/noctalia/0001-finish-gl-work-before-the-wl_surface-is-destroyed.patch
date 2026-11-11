@@ -1,15 +1,19 @@
 --- a/src/render/backend/gles_render_backend.cpp
 +++ b/src/render/backend/gles_render_backend.cpp
-@@ -230,6 +230,12 @@
-         }
-         eglDestroySurface(m_display, m_surface);
-         m_surface = EGL_NO_SURFACE;
-+        // GL drivers on Vulkan (zink) present asynchronously: a queued present can still use the
-+        // wl_surface after eglDestroySurface returns, and the caller destroys that surface next,
-+        // which the compositor rejects as a request on an invalid object. Finish the work first.
-+        if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+@@ -214,6 +214,16 @@
+ 
+     void destroy() override {
+       if (m_surface != EGL_NO_SURFACE) {
++        // GL drivers on Vulkan (zink) present asynchronously: the present queued by the last swap
++        // can reach the wl_surface after eglDestroySurface returns, and the caller destroys that
++        // surface next, which the compositor rejects as a request on an invalid object. glFinish
++        // alone returns at once when nothing was drawn since the swap, so queue a clear of the
++        // (about to be discarded) surface behind that present and wait for it.
++        const EGLContext context = eglGetCurrentContext();
++        if (context != EGL_NO_CONTEXT && eglMakeCurrent(m_display, m_surface, m_surface, context) == EGL_TRUE) {
++          glClear(GL_COLOR_BUFFER_BIT);
 +          glFinish();
 +        }
-       }
- 
-       if (m_window != nullptr) {
+         if (isCurrentEglSurface(m_display, m_surface)) {
+           const EGLContext currentContext = eglGetCurrentContext();
+           if (currentContext != EGL_NO_CONTEXT
