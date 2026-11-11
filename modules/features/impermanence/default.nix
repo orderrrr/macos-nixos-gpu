@@ -29,8 +29,8 @@
       users.${config.meta.username}.directories = [
         "opt"
         "dwn" # XDG downloads (system/core/user.nix)
-        ".cache/nix"
-        ".cache/zig"
+        ".local/cache/nix"
+        ".local/cache/zig"
       ];
     };
   };

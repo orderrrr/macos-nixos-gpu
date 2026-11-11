@@ -11,7 +11,7 @@
       hardware.graphics.enable = true;
       # Compiled shaders, so Vulkan and zink apps start fast after a reboot.
       environment.persistence."/persist".users.${config.meta.username}.directories = [
-        ".cache/mesa_shader_cache"
+        ".local/cache/mesa_shader_cache"
       ];
       environment.sessionVariables = {
         VK_DRIVER_FILES = "${mesa}/share/vulkan/icd.d/virtio_icd.aarch64.json";

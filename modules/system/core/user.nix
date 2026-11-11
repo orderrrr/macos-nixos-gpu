@@ -16,6 +16,8 @@ in
     };
     security.sudo.wheelNeedsPassword = false;
     services.getty.autologinUser = username;
+    # Caches under ~/.local, so ~ holds only .config and .local besides your folders.
+    environment.sessionVariables.XDG_CACHE_HOME = "$HOME/.local/cache";
     # Short names for the XDG folders apps use: downloads in ~/dwn, pictures in ~/pic.
     systemd.user.tmpfiles.rules = [
       "L+ %h/.config/user-dirs.dirs - - - - ${builtins.toFile "user-dirs.dirs" ''
