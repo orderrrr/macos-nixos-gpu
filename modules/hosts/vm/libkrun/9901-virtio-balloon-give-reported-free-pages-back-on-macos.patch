@@ -1,0 +1,300 @@
+virtio-balloon (macOS): give reported free pages back to the Mac
+
+A free page report did madvise(MADV_FREE) on the range. Guest RAM is one anonymous
+mapping that XNU backs with 128 MB VM objects, and hv_vm_map shares them with the
+hypervisor's map: the advice frees nothing there, so every page the guest ever touched
+stayed resident or compressed in the VM's footprint (measured: a 2 GB allocation freed
+in the guest kept +1.8 GB in Activity Monitor). Replacing the range alone (MAP_FIXED)
+drops only the mapping, the old pages stay in the object.
+
+Now each reported range is unmapped from the guest, moved aside (mach_vm_remap: a second
+mapping of the same pages), replaced with fresh demand-zero memory and mapped into the
+guest again, all before the report is acknowledged. A worker thread advises the
+moved-aside range MADV_FREE_REUSABLE twice, 20 ms apart (pages macOS is compressing at
+that moment are skipped), and unmaps it. Reports outside guest RAM are ignored. Linux
+keeps MADV_DONTNEED.
+
+Design from OmacVM's QEMU patches (qemu-hvf-free-page-reclaim*.patch, MIT).
+Applied by nixos-gpu-vm's build.sh after steamac's libkrun patches.
+
+diff --git a/src/devices/src/virtio/balloon/device.rs b/src/devices/src/virtio/balloon/device.rs
+index 85b2812..802d9ab 100644
+--- a/src/devices/src/virtio/balloon/device.rs
++++ b/src/devices/src/virtio/balloon/device.rs
+@@ -1,9 +1,11 @@
+ use std::cmp;
+-use std::convert::TryInto;
+ use std::io::Write;
+ 
+ use utils::eventfd::EventFd;
+-use vm_memory::{ByteValued, GuestMemory, GuestMemoryMmap};
++use vm_memory::{Address, ByteValued, GuestMemory, GuestMemoryMmap};
++
++#[cfg(target_os = "macos")]
++use super::reclaim::Reclaim;
+ 
+ use super::super::{
+     ActivateError, ActivateResult, BalloonError, DeviceQueue, DeviceState, QueueConfig,
+@@ -52,10 +54,14 @@ pub struct Balloon {
+     pub(crate) activate_evt: EventFd,
+     pub(crate) device_state: DeviceState,
+     config: VirtioBalloonConfig,
++    /// End of guest RAM: a free page report beyond it (the shared memory windows) is ignored.
++    ram_end: u64,
++    #[cfg(target_os = "macos")]
++    reclaim: Reclaim,
+ }
+ 
+ impl Balloon {
+-    pub fn new() -> super::Result<Balloon> {
++    pub fn new(ram_end: u64) -> super::Result<Balloon> {
+         Ok(Balloon {
+             queues: None,
+             avail_features: AVAIL_FEATURES,
+@@ -64,6 +70,9 @@ impl Balloon {
+                 .map_err(BalloonError::EventFd)?,
+             device_state: DeviceState::Inactive,
+             config: VirtioBalloonConfig::default(),
++            ram_end,
++            #[cfg(target_os = "macos")]
++            reclaim: Reclaim::new(),
+         })
+     }
+ 
+@@ -88,22 +97,34 @@ impl Balloon {
+         while let Some(head) = queues[FRQ_INDEX].queue.pop(mem) {
+             let index = head.index;
+             for desc in head.into_iter() {
+-                let host_addr = mem.get_host_address(desc.addr).unwrap();
++                let len = desc.len as usize;
++                let in_ram = desc
++                    .addr
++                    .checked_add(len as u64)
++                    .is_some_and(|end| end.raw_value() <= self.ram_end);
++                // get_slice: the whole range lies in one guest memory region.
++                let slice = mem.get_slice(desc.addr, len).ok().filter(|_| in_ram);
++                let Some(host_addr) = slice.map(|s| s.ptr_guard_mut().as_ptr()) else {
++                    warn!(
++                        "balloon: ignoring a free page report outside guest RAM: \
++                         guest_addr={:?} len={len}",
++                        desc.addr
++                    );
++                    continue;
++                };
+                 debug!(
+                     "balloon: should release guest_addr={:?} host_addr={:p} len={}",
+                     desc.addr, host_addr, desc.len
+                 );
++                // The guest touches none of the range until the report is acknowledged.
+                 #[cfg(target_os = "linux")]
+-                let advice = libc::MADV_DONTNEED;
+-                #[cfg(target_os = "macos")]
+-                let advice = libc::MADV_FREE;
++                // SAFETY: host_addr is the start of len bytes of guest RAM (get_slice).
+                 unsafe {
+-                    libc::madvise(
+-                        host_addr as *mut libc::c_void,
+-                        desc.len.try_into().unwrap(),
+-                        advice,
+-                    )
++                    libc::madvise(host_addr as *mut libc::c_void, len, libc::MADV_DONTNEED)
+                 };
++                #[cfg(target_os = "macos")]
++                self.reclaim
++                    .give_back(desc.addr.raw_value(), host_addr, len);
+             }
+ 
+             have_used = true;
+diff --git a/src/devices/src/virtio/balloon/mod.rs b/src/devices/src/virtio/balloon/mod.rs
+index 6859c79..c05370f 100644
+--- a/src/devices/src/virtio/balloon/mod.rs
++++ b/src/devices/src/virtio/balloon/mod.rs
+@@ -1,5 +1,7 @@
+ mod device;
+ mod event_handler;
++#[cfg(target_os = "macos")]
++mod reclaim;
+ 
+ pub use self::defs::uapi::VIRTIO_ID_BALLOON as TYPE_BALLOON;
+ pub use self::device::Balloon;
+diff --git a/src/devices/src/virtio/balloon/reclaim.rs b/src/devices/src/virtio/balloon/reclaim.rs
+new file mode 100644
+index 0000000..e792897
+--- /dev/null
++++ b/src/devices/src/virtio/balloon/reclaim.rs
+@@ -0,0 +1,162 @@
++//! macOS: give the pages of a free page report back to the Mac.
++//!
++//! Guest RAM is one anonymous mapping that XNU backs with 128 MB VM objects, and hv_vm_map
++//! shares those objects with the hypervisor's map. madvise(MADV_FREE) on a range of a shared
++//! object frees nothing, and neither does replacing the range alone (MAP_FIXED): the old pages
++//! stay in the object, resident or compressed, until the whole object goes. So a reported
++//! range is moved aside (mach_vm_remap: a second mapping of the same pages, none touched),
++//! fresh demand-zero memory is mapped in its place and into the guest, and a worker thread
++//! advises the moved-aside range MADV_FREE_REUSABLE (macOS drops its compressed copies and
++//! takes its resident pages first) and unmaps it. The advice runs off the device thread: it
++//! costs about 0.1 ms per MB the Mac still holds.
++//!
++//! Design from OmacVM's QEMU patches (qemu-hvf-free-page-reclaim*.patch, MIT).
++
++use std::sync::mpsc::{channel, Receiver, Sender};
++use std::thread;
++use std::time::Duration;
++
++use hvf::bindings::{
++    hv_vm_map, hv_vm_unmap, HV_MEMORY_EXEC, HV_MEMORY_READ, HV_MEMORY_WRITE, HV_SUCCESS,
++};
++
++type MachPort = u32;
++
++const KERN_SUCCESS: i32 = 0;
++const VM_FLAGS_ANYWHERE: i32 = 1;
++const VM_INHERIT_NONE: u32 = 2;
++
++extern "C" {
++    static mach_task_self_: MachPort;
++
++    fn mach_vm_remap(
++        target_task: MachPort,
++        target_address: *mut u64,
++        size: u64,
++        mask: u64,
++        flags: i32,
++        src_task: MachPort,
++        src_address: u64,
++        copy: i32,
++        cur_protection: *mut i32,
++        max_protection: *mut i32,
++        inheritance: u32,
++    ) -> i32;
++}
++
++/// A moved-aside range the worker releases.
++struct Aside {
++    addr: u64,
++    len: usize,
++}
++
++pub(crate) struct Reclaim {
++    worker: Sender<Aside>,
++}
++
++impl Reclaim {
++    pub(crate) fn new() -> Reclaim {
++        let (worker, ranges) = channel();
++        thread::Builder::new()
++            .name("balloon reclaim".into())
++            .spawn(move || release_worker(ranges))
++            .expect("failed to spawn the balloon reclaim thread");
++        Reclaim { worker }
++    }
++
++    /// Replaces the reported range [gpa, gpa + len), mapped at host, with fresh memory. The
++    /// guest touches none of it until the report is acknowledged.
++    pub(crate) fn give_back(&self, gpa: u64, host: *mut u8, len: usize) {
++        let page = page_size();
++        if len == 0 || (gpa as usize | host as usize | len) % page != 0 {
++            return;
++        }
++
++        // SAFETY: hv_vm_unmap only touches the hypervisor's map of this guest range.
++        if unsafe { hv_vm_unmap(gpa, len) } != HV_SUCCESS {
++            error!("balloon: hv_vm_unmap failed for gpa={gpa:#x} len={len}");
++            return;
++        }
++
++        let task = unsafe { mach_task_self_ };
++        let mut aside: u64 = 0;
++        let (mut cur, mut max) = (0, 0);
++        // SAFETY: maps the same pages a second time at a new address; nothing is moved.
++        let moved = unsafe {
++            mach_vm_remap(
++                task,
++                &mut aside,
++                len as u64,
++                0,
++                VM_FLAGS_ANYWHERE,
++                task,
++                host as u64,
++                0,
++                &mut cur,
++                &mut max,
++                VM_INHERIT_NONE,
++            )
++        } == KERN_SUCCESS;
++
++        // SAFETY: replaces the range in place; the guest memory mapping stays the same size.
++        let fresh = unsafe {
++            libc::mmap(
++                host as *mut libc::c_void,
++                len,
++                libc::PROT_READ | libc::PROT_WRITE,
++                libc::MAP_FIXED | libc::MAP_PRIVATE | libc::MAP_ANON,
++                -1,
++                0,
++            )
++        };
++        if fresh != host as *mut libc::c_void {
++            panic!(
++                "balloon: new backing for gpa={gpa:#x} len={len} failed: {}",
++                std::io::Error::last_os_error()
++            );
++        }
++
++        let flags = (HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC) as u64;
++        // SAFETY: host is a live mapping of len bytes, the guest's view of gpa.
++        if unsafe { hv_vm_map(host as *mut libc::c_void, gpa, len, flags) } != HV_SUCCESS {
++            panic!("balloon: hv_vm_map failed for gpa={gpa:#x} len={len}");
++        }
++
++        if moved {
++            // The worker lives as long as the process; a send can't fail.
++            let _ = self.worker.send(Aside { addr: aside, len });
++        }
++    }
++}
++
++/// Advises each moved-aside range MADV_FREE_REUSABLE and unmaps it. Pages macOS is compressing
++/// at that moment are skipped by the advice, so a batch is advised twice, 20 ms apart.
++fn release_worker(ranges: Receiver<Aside>) {
++    while let Ok(first) = ranges.recv() {
++        let batch: Vec<Aside> = std::iter::once(first).chain(ranges.try_iter()).collect();
++        for pass in 0..2 {
++            if pass > 0 {
++                thread::sleep(Duration::from_millis(20));
++            }
++            for r in &batch {
++                // SAFETY: the range is our own second mapping of pages no one else maps.
++                unsafe {
++                    libc::madvise(
++                        r.addr as *mut libc::c_void,
++                        r.len,
++                        libc::MADV_FREE_REUSABLE,
++                    )
++                };
++            }
++        }
++        for r in &batch {
++            // SAFETY: as above; nothing else refers to this mapping.
++            unsafe { libc::munmap(r.addr as *mut libc::c_void, r.len) };
++        }
++    }
++}
++
++fn page_size() -> usize {
++    // SAFETY: sysconf has no preconditions.
++    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
++}
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index b0eee6e..5a1286e 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -2230,7 +2230,7 @@ fn attach_balloon_device(
+ ) -> std::result::Result<(), StartMicrovmError> {
+     use self::StartMicrovmError::*;
+ 
+-    let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
++    let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new(vmm.arch_memory_info.ram_last_addr).unwrap()));
+ 
+     event_manager
+         .add_subscriber(balloon.clone())
