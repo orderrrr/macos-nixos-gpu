@@ -13,7 +13,7 @@
       # niri starts xwayland-satellite when an X11 app connects; without it X11 apps don't open.
       environment.systemPackages = [ pkgs.xwayland-satellite ];
       # Where Mod+Shift+S saves (config.kdl's screenshot-path).
-      environment.persistence."/persist".users.${config.meta.username}.directories = [ "Pictures" ];
+      environment.persistence."/persist".users.${config.meta.username}.directories = [ "pic" ];
 
       # niri reads this when there is no ~/.config/niri/config.kdl.
       environment.etc."niri/config.kdl".text = ''
