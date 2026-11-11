@@ -23,6 +23,13 @@
     {
       programs.noctalia = {
         enable = true;
+        # Upstream 5.4.1 can destroy a wl_surface while zink still presents to it (the patch says
+        # why); with it, Noctalia can draw on the GPU again.
+        package = pkgs.noctalia.overrideAttrs (old: {
+          patches = (old.patches or [ ]) ++ [
+            ./0001-finish-gl-work-before-the-wl_surface-is-destroyed.patch
+          ];
+        });
         systemd.enable = true; # started with niri's graphical-session.target
       };
       # Draw with software GL (llvmpipe), not zink: zink presents through Venus's Vulkan WSI,

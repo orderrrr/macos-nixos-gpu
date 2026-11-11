@@ -88,6 +88,13 @@ _: {
       # Memory: no name-service cache daemon (its only plugins look up containers and the own
       # hostname, which /etc/hosts has), and no login on hvc0, which the launcher only reads as a log.
       services.nscd.enable = false;
+      # A 10-way C++ build once ran the VM out of memory and the kernel killed niri: compressed swap
+      # in RAM gives headroom before anything is killed, and in-VM builds use at most 4 cores.
+      zramSwap.enable = true;
+      nix.settings = {
+        cores = 4;
+        max-jobs = 1;
+      };
       system.nssModules = lib.mkForce [ ];
       systemd.services."serial-getty@hvc0".enable = false;
     };

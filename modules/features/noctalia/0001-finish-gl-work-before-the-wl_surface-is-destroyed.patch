@@ -1,0 +1,15 @@
+--- a/src/render/backend/gles_render_backend.cpp
++++ b/src/render/backend/gles_render_backend.cpp
+@@ -230,6 +230,12 @@
+         }
+         eglDestroySurface(m_display, m_surface);
+         m_surface = EGL_NO_SURFACE;
++        // GL drivers on Vulkan (zink) present asynchronously: a queued present can still use the
++        // wl_surface after eglDestroySurface returns, and the caller destroys that surface next,
++        // which the compositor rejects as a request on an invalid object. Finish the work first.
++        if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
++          glFinish();
++        }
+       }
+ 
+       if (m_window != nullptr) {
