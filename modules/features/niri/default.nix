@@ -10,6 +10,14 @@
     in
     {
       programs.niri.enable = true;
+
+      # Portals stay niri's (gnome for screen sharing, gtk for the rest): xdg-desktop-portal-wlr
+      # idled 6 MB heavier, as it loads Mesa up front, and can't share a single window.
+      # File dialogs come from gtk, not Nautilus.
+      programs.niri.useNautilus = false;
+      # The document portal only hands files to Flatpak sandboxes, and there are none. Masked:
+      # the xdg-desktop-portal package that ships it stays the stock, cached one.
+      systemd.user.services.xdg-document-portal.enable = false;
       # niri starts xwayland-satellite when an X11 app connects; without it X11 apps don't open.
       environment.systemPackages = [ pkgs.xwayland-satellite ];
       # Where Mod+Shift+S saves (config.kdl's screenshot-path).

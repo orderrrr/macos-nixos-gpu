@@ -97,5 +97,7 @@ _: {
       };
       system.nssModules = lib.mkForce [ ];
       systemd.services."serial-getty@hvc0".enable = false;
+      # The journal is on /persist and journald maps its files, which had grown to 80 MB.
+      services.journald.settings.Journal.SystemMaxUse = "50M";
     };
 }
