@@ -45,6 +45,11 @@ stdenv.mkDerivation {
   patches = [
     ./patches/0002-venus-avoid-null-ptr-dereference-for-zero-external-image-handleType.patch
     ./patches/0003-venus-query-KosmicKrisp-external-legacy-tiling.patch
+    # From omacvm (MIT). 0004 is upstream 935c4ec3: drop it once the pin includes that commit.
+    ./patches/0004-venus-free-TLS-after-driver-unload.patch
+    # Chrome's ANGLE on Vulkan and its WebGPU adapter.
+    ./patches/0005-venus-keep-incremental-present-in-the-guest.patch
+    ./patches/0006-venus-opaque-fd-semaphores.patch
   ];
 
   # The meson hook builds with wrap_mode=nodownload: the wrap's directory has to be there already.

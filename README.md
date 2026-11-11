@@ -6,9 +6,17 @@ NixOS (aarch64) in a VM on Apple silicon, with Vulkan on the Mac's GPU:
 app ─ Vulkan ─ Mesa Venus (guest) ─ virtio-gpu ─ libkrun ─ virglrenderer ─ KosmicKrisp/MoltenVK ─ Metal
 ```
 
-The VM is booted by the libkrun launcher of [steamac](https://github.com/fxgl/steamac), used
-unmodified. This repo is the guest: a NixOS system with a Venus-only Mesa, the kernel patches
-Venus needs on 16K-page hosts, and niri as a minimal desktop. OpenGL apps run through zink.
+The VM is booted by the libkrun launcher of [steamac](https://github.com/fxgl/steamac), with
+this repo's patches on top. This repo is the guest too: a NixOS system with a Venus-only Mesa,
+the kernel patches Venus needs on 16K-page hosts, and niri as a minimal desktop. OpenGL apps run
+through zink.
+
+The Mac integration comes from [omacvm](https://github.com/gillesgoetsch/omacvm) (MIT): its
+guest agents as NixOS modules (`modules/features/omacvm*`), and its Mac side ported into the
+launcher (`modules/hosts/vm/launcher`): the Mac's battery, AirPods and media keys (Now Playing),
+the camera, Touch ID for polkit and sudo, and full screen over the MacBook's notch with Noctalia's
+bar in the strip beside it. omacvm's helper apps add trackpad gestures and the Mac's Wi-Fi,
+Bluetooth and sound devices, brightness and time zone (see "The Mac's helpers").
 
 ## Prerequisites (once per Mac)
 
@@ -30,12 +38,39 @@ git clone <this repo> ~/VM/.nixos-gpu-vm && cd ~/VM/.nixos-gpu-vm
 ./run.sh     # boot (10 vCPUs, 8 GB); extra arguments go to the launcher, e.g. ./run.sh --mem 16384
 ```
 
-`build.sh` also applies this repo's libkrun patch (`modules/hosts/vm/libkrun`) to steamac's.
+`build.sh` also applies this repo's patches to steamac's libkrun (`modules/hosts/vm/libkrun`),
+KosmicKrisp (`modules/hosts/vm/kosmickrisp`) and launcher (`modules/hosts/vm/launcher`; with
+crash-report and game-stats uploads off). The launcher's omacvm features can be switched off with
+`--no-omacvm-battery`, `--no-omacvm-media`, `--no-omacvm-camera`, `--no-touchid` and
+`--no-fullpanel`.
 
 steamac and the VM's disk live in `~/.local/share/nixos-gpu-vm/`. The disk is made once and
 kept, so the guest's home survives changes. In the launcher, Ctrl+Cmd+G grabs the pointer
 (Ctrl+Option releases) and Ctrl+Cmd+F toggles fullscreen; Settings (Cmd+,) > Display > Retina
 resolution gives native pixels. SSH: `ssh -p 2222 <user>@127.0.0.1`.
+
+### The Mac's helpers (once per Mac)
+
+Gestures and the Bridge (Wi-Fi, Bluetooth, sound devices, brightness, time zone, Touch ID's
+dialog) are omacvm's helper apps, patched to know steamac's launcher (`modules/hosts/vm/helpers`).
+Build and install them, then allow what macOS asks (Accessibility, Input Monitoring; Location
+shows the Wi-Fi's name):
+
+```sh
+modules/hosts/vm/helpers/build.sh --install
+```
+
+Then give the VM the Bridge's token and its Touch ID key (the guest reaches the Mac's helpers at
+gvproxy's 192.168.127.254):
+
+```sh
+t="$HOME/Library/Application Support/omacvm-bridge/token"
+ssh -p 2222 <user>@127.0.0.1 'umask 077; mkdir -p ~/.config/omacvm-bridge; cat > ~/.config/omacvm-bridge/token' < "$t"
+d="$HOME/Library/Application Support/omacvm/vm-keys"; mkdir -p "$d"; chmod 700 "$d"
+k="$d/$(printf app/nixos-gpu-vm | shasum -a 256 | cut -c1-32).touchid"
+[ -s "$k" ] || (umask 077; openssl rand -hex 32 > "$k")
+ssh -p 2222 <user>@127.0.0.1 'sudo install -m600 /dev/stdin /var/lib/omacvm/touchid-key' < "$k"
+```
 
 ## Sharing files
 
@@ -69,6 +104,7 @@ the VM uses; `meta.nix` holds the user's name and email.
 
 - `modules/system/core/kernel.config` is steamac's kernel config resolved for one kernel
   version. Regenerate it when nixpkgs moves `linux_latest` (see the comment in `boot.nix`).
+- No hardware video decoding: libkrun has no virgl OpenGL, which omacvm's decoding runs through.
 - virtio-fs on macOS doesn't confine the guest to the shared folder by itself: root in the
   guest (it controls the kernel) could reach any path your Mac user can. The libkrun patch here
   rejects `.`, `..` and `/` in names and keeps symlinks unfollowed; still, share only what you
@@ -76,4 +112,4 @@ the VM uses; `meta.nix` holds the user's name and email.
 
 ## Licences
 
-Files from steamac keep their licences; see `NOTICE` and `LICENSES/`.
+Files from steamac and omacvm keep their licences; see `NOTICE` and `LICENSES/`.

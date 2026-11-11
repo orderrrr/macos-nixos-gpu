@@ -1,0 +1,26 @@
+diff --git a/src/bridge/mac/external-brightness.swift b/src/bridge/mac/external-brightness.swift
+index 3af960f..eb7cc90 100644
+--- a/src/bridge/mac/external-brightness.swift
++++ b/src/bridge/mac/external-brightness.swift
+@@ -499,6 +499,8 @@ enum VMApp {
+     if exe.hasSuffix("/runtime/bin/OmacVM") || name == "qemu-system-aarch64" {
+       return VMOwner.ours(appID: appID(exe), testBridge: testBridge) ? .omacvm : nil
+     }
++    // steamac's libkrun launcher (nixos-gpu-vm), bare or inside its .app: its one process's window is the VM.
++    if name == "steamac-vm" { return .omacvm }
+     return nil
+   }
+ 
+diff --git a/src/bridge/mac/touchid_policy.swift b/src/bridge/mac/touchid_policy.swift
+index 41b69fd..5b29de7 100644
+--- a/src/bridge/mac/touchid_policy.swift
++++ b/src/bridge/mac/touchid_policy.swift
+@@ -157,7 +157,7 @@ func vmTypeOfFront(kernelPath: String?, launchServicesPath: String?) -> String?
+ 
+ func vmTypeOfExecutable(_ path: String) -> String? {
+   let name = (path as NSString).lastPathComponent
+-  return path.hasSuffix("/runtime/bin/OmacVM") || name == "qemu-system-aarch64" ? "app" : nil
++  return path.hasSuffix("/runtime/bin/OmacVM") || name == "qemu-system-aarch64" || name == "steamac-vm" ? "app" : nil   // + steamac's libkrun launcher (nixos-gpu-vm), as VMApp.of
+ }
+ 
+ /// One dialog at a time on the Mac; per VM one request every 2 s, 10 a

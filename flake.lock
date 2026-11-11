@@ -162,6 +162,23 @@
         "type": "github"
       }
     },
+    "omacvm": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794377530,
+        "narHash": "sha256-Gg6k0oOY9yjF3q/2p9R3jfe5IIm6ss1BTvvUhamdH3o=",
+        "owner": "gillesgoetsch",
+        "repo": "omacvm",
+        "rev": "ebe2cbb15ddd7b2ee644b4ebcb9a0b2b87469e0f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "gillesgoetsch",
+        "repo": "omacvm",
+        "rev": "ebe2cbb15ddd7b2ee644b4ebcb9a0b2b87469e0f",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-file": "flake-file",
@@ -170,6 +187,7 @@
         "import-tree": "import-tree",
         "nix-index-database": "nix-index-database",
         "nixpkgs": "nixpkgs",
+        "omacvm": "omacvm",
         "steamac": "steamac",
         "treefmt-nix": "treefmt-nix",
         "zen-browser": "zen-browser"

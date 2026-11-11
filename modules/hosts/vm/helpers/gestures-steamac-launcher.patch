@@ -1,0 +1,25 @@
+diff --git a/src/gestures/mac/omacvm-gestures.c b/src/gestures/mac/omacvm-gestures.c
+index fb2ccb2..d7cb52f 100644
+--- a/src/gestures/mac/omacvm-gestures.c
++++ b/src/gestures/mac/omacvm-gestures.c
+@@ -1413,8 +1413,12 @@ static int endsWith(const char *s, const char *end) {
+ // identifier `ident`, NULL if unknown) is this identity's OmacVM app
+ // (NET_APP), or -1: any other app (the retired VM apps too, 3.4.0).
+ // *foreign: a VM (QEMU, not the launcher) of the other identity's OmacVM app.
++// steamac's libkrun launcher (steamac-vm, nixos-gpu-vm) runs its VM in one
++// process whose window is the VM, as OmacVM.app's QEMU: this Gestures' too.
++#define STEAMAC_NAME "steamac-vm"
+ static int vmNetOf(const char *name, const char *exe, const char *ident, int *foreign) {
+   *foreign = 0;
++  if (!strcmp(name, STEAMAC_NAME)) return NET_APP;
+   if (strcmp(name, "OmacVM")) return -1;
+   if (vmOursRule(ident, testIdentity())) return NET_APP;
+   // Its QEMU ("<id>.qemu", or not the launcher's path), not its launcher.
+@@ -1435,6 +1439,7 @@ static int vmNet(pid_t pid, const char *name, int *foreign) {
+ static int isQemu(pid_t pid) {
+   char path[PROC_PIDPATHINFO_MAXSIZE], ident[256];
+   if (proc_pidpath(pid, path, sizeof path) <= 0) return 0;
++  if (endsWith(path, "/" STEAMAC_NAME)) return 1;   // also inside its .app (Contents/MacOS)
+   return !strstr(path, "/Contents/MacOS/") && vmOursRule(signingID(pid, ident, sizeof ident) ? ident : NULL, testIdentity());
+ }
+ 

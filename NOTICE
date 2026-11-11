@@ -13,3 +13,14 @@ MIT (LICENSES/MIT.txt) - Mesa patches:
 Apache-2.0 (LICENSES/Apache-2.0.txt) - adapted from steamac's build scripts:
   modules/system/drivers/venus/_mesa.nix
     (the Venus-only Mesa build of steamac guest/mesa/container/common.sh)
+
+Parts of this repository come from omacvm (https://github.com/gillesgoetsch/omacvm),
+Copyright (c) 2026 Gilles Goetsch, under MIT (LICENSES/MIT.txt):
+  modules/system/drivers/venus/patches/0004-* 0005-* 0006-*   (omacvm src/app/guest/venus/patches)
+  modules/hosts/vm/kosmickrisp/   (omacvm app/runtime/patches/mesa-kosmickrisp-shared-align.patch)
+  modules/hosts/vm/launcher/   (omacvm app/app/Sources: battery, media, camera, Touch ID, full panel,
+    ported into steamac's launcher)
+  modules/hosts/vm/libkrun/9901-*   (omacvm's free-page give-back, ported to libkrun)
+  modules/hosts/vm/helpers/   (patches to omacvm's Bridge and Gestures helpers)
+The guest modules under modules/features/omacvm* package omacvm's own agents from its source,
+pinned in flake.lock.

@@ -1,0 +1,409 @@
+From 750e5f1f7acdff4a3f3e2ce86e9a7a5421f95c8e Mon Sep 17 00:00:00 2001
+From: nmcintosh <nathanielstewartmcintosh@gmail.com>
+Date: Wed, 11 Nov 2026 23:06:16 +0200
+Subject: [PATCH 2/3] launcher: quiet boot: black with the NixOS snowflake, no
+ progress pill
+
+The boot and shutdown overlay is black with the NixOS snowflake in the middle and no
+text but a failed boot's; it fades into the guest's picture on ready. No progress pill
+while booting or shutting down (the no-picture report after ready stays). Self-tests
+follow.
+---
+ .../launcher/Sources/steamac-vm/Overlay.swift | 217 ++++++------------
+ .../Sources/steamac-vm/OverlaySelfTest.swift  |  18 +-
+ .../Sources/steamac-vm/PillSelfTest.swift     |   6 +-
+ host/launcher/Sources/steamac-vm/Window.swift |   3 +-
+ 4 files changed, 84 insertions(+), 160 deletions(-)
+
+diff --git a/host/launcher/Sources/steamac-vm/Overlay.swift b/host/launcher/Sources/steamac-vm/Overlay.swift
+index 7f11696..d410912 100644
+--- a/host/launcher/Sources/steamac-vm/Overlay.swift
++++ b/host/launcher/Sources/steamac-vm/Overlay.swift
+@@ -2,27 +2,22 @@ import AppKit
+ import Metal
+ import QuartzCore
+ 
+-/// "FX STEAM LAUNCHER" boot / shutdown overlay: Core Animation layers over the Metal view.
+-/// Never takes mouse events (hitTest → nil); when hidden it is `isHidden` with every animation
+-/// removed, so it costs nothing per frame.
++/// Quiet boot / shutdown screen (nixos-gpu-vm): black, the NixOS snowflake in the middle, no
++/// progress and no text but an error ("could not start"). It fades into the guest's picture on
++/// `ready` (fx.progress). Never takes mouse events (hitTest → nil); when hidden it is `isHidden`,
++/// so it costs nothing per frame.
+ final class OverlayView: NSView {
+-    private let background = CAGradientLayer()
+-    private let glow = CAGradientLayer()
+-    private let sheen = CAGradientLayer()
+-    private let wordmark = CATextLayer()
++    private let snowflake = CAShapeLayer()
++    private let snowflakeDark = CAShapeLayer()
+     private let titleLayer = CATextLayer()
+-    private let percentLayer = CATextLayer()
+     private let detailLayer = CATextLayer()
+-    private let footer = CATextLayer()
+-    private let track = CALayer()
+-    private let fill = CAGradientLayer()
+     private var state = ProgressState()
+     private(set) var shown = false
+     private var fading = false
+     /// Called with the new `shown` value when the overlay starts showing / starts fading out.
+     var onVisibilityChange: ((Bool) -> Void)?
+-    /// Progress bar track, in view coordinates (self-test pixel checks).
+-    var barFrame: CGRect { track.frame }
++    /// The snowflake, in view coordinates (self-test pixel checks; steamac's progress bar was here).
++    var barFrame: CGRect { snowflake.frame }
+     var currentTitle: String { state.title }
+ 
+     static func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
+@@ -33,50 +28,50 @@ final class OverlayView: NSView {
+     /// Host Vulkan driver of this boot (VM.start).
+     static var vulkanDriver = LauncherSettings.VulkanDriver.moltenvk
+ 
+-    static var gpuFooter: String {
+-        let gpu = MTLCreateSystemDefaultDevice()?.name ?? "Apple GPU"
+-        let short = gpu.hasPrefix("Apple ") ? String(gpu.dropFirst(6)) : gpu
+-        return "SteamOS · Venus → \(vulkanDriver.name) · \(short)"
+-    }
++    /// The two halves of the NixOS snowflake (nixos-artwork's nix-snowflake.svg, CC-BY 4.0, its
++    /// colours without the gradients): one lambda turned about the centre every 60°, the dark ones
++    /// at 0° and ±120°, the light ones at ±60° and 180°. Unit square, y up, centred on 0.5.
++    static let snowflakePaths: (light: CGPath, dark: CGPath) = {
++        // The lambda as in the SVG: its first point, then relative moves (y down there).
++        var p = CGPoint(x: 309.54892, y: -710.38827)
++        let moves: [(CGFloat, CGFloat)] = [(122.19683, 211.67512), (-56.15706, 0.5268), (-32.6236, -56.8692),
++                                           (-32.85645, 56.5653), (-27.90237, -0.011), (-14.29086, -24.6896),
++                                           (46.81047, -80.4901), (-33.22946, -57.8257)]
++        let centre = CGPoint(x: 407.3, y: -715.8), size: CGFloat = 501.56
++        let lambda = CGMutablePath()
++        lambda.move(to: CGPoint(x: p.x - centre.x, y: centre.y - p.y))
++        for (dx, dy) in moves {
++            p.x += dx; p.y += dy
++            lambda.addLine(to: CGPoint(x: p.x - centre.x, y: centre.y - p.y))
++        }
++        lambda.closeSubpath()
++        func turned(_ degrees: [CGFloat]) -> CGPath {
++            let out = CGMutablePath()
++            for d in degrees {
++                // SVG's rotate turns clockwise on screen; y is up here.
++                let t = CGAffineTransform(translationX: 0.5, y: 0.5).scaledBy(x: 1 / size, y: 1 / size).rotated(by: -d * .pi / 180)
++                out.addPath(lambda, transform: t)
++            }
++            return out
++        }
++        return (turned([60, -60, 180]), turned([0, 120, -120]))
++    }()
+ 
+     override init(frame: NSRect) {
+         super.init(frame: frame)
+         wantsLayer = true
+         layer = CALayer()
+         layer!.masksToBounds = true
++        layer!.backgroundColor = OverlayView.color(0x000000)
+         autoresizingMask = [.width, .height]
+-
+-        background.colors = [OverlayView.color(0x171a21), OverlayView.color(0x0b0d12)]
+-        background.startPoint = CGPoint(x: 0.5, y: 1)
+-        background.endPoint = CGPoint(x: 0.5, y: 0)
+-        glow.type = .radial
+-        glow.colors = [OverlayView.color(0x66c0f4, 0.16), OverlayView.color(0x66c0f4, 0)]
+-        glow.startPoint = CGPoint(x: 0.5, y: 0.5)
+-        glow.endPoint = CGPoint(x: 1, y: 1)
+-        sheen.colors = [OverlayView.color(0xffffff, 0), OverlayView.color(0xc7e6ff, 0.05), OverlayView.color(0xffffff, 0)]
+-        sheen.startPoint = CGPoint(x: 0, y: 0.5)
+-        sheen.endPoint = CGPoint(x: 1, y: 0.5)
+-        sheen.transform = CATransform3DMakeRotation(-.pi / 9, 0, 0, 1)
+-
+-        for t in [wordmark, titleLayer, percentLayer, detailLayer, footer] {
++        snowflake.fillColor = OverlayView.color(0x7ebae4)
++        snowflakeDark.fillColor = OverlayView.color(0x5277c3)
++        for t in [titleLayer, detailLayer] {
+             t.alignmentMode = .center
+             t.truncationMode = .end
+-            t.isWrapped = false
+-        }
+-        percentLayer.alignmentMode = .right
+-        wordmark.shadowColor = OverlayView.color(0x66c0f4)
+-        wordmark.shadowOpacity = 0.9
+-        wordmark.shadowOffset = .zero
+-        track.backgroundColor = OverlayView.color(0xffffff, 0.08)
+-        track.masksToBounds = true
+-        fill.colors = [OverlayView.color(0x1a9fff), OverlayView.color(0x66c0f4)]
+-        fill.startPoint = CGPoint(x: 0, y: 0.5)
+-        fill.endPoint = CGPoint(x: 1, y: 0.5)
+-        fill.anchorPoint = CGPoint(x: 0, y: 0.5)
+-        track.addSublayer(fill)
+-        for l in [background, glow, sheen, wordmark, titleLayer, track, percentLayer, detailLayer, footer] as [CALayer] {
+-            layer!.addSublayer(l)
++            t.isWrapped = true
+         }
++        for l in [snowflake, snowflakeDark, titleLayer, detailLayer] as [CALayer] { layer!.addSublayer(l) }
+         alphaValue = 0
+         isHidden = true
+     }
+@@ -88,15 +83,14 @@ final class OverlayView: NSView {
+ 
+     // MARK: visibility
+ 
+-    /// Fade in (0.4 s) and start the ambient animations.
++    /// Fade in (0.4 s).
+     func show(animated: Bool = true) {
+         guard !shown || fading else { return }
+         shown = true
+         onVisibilityChange?(true)
+         fading = false
+         isHidden = false
+-        startAnimations()
+-        apply(state, animated: false)
++        apply(state)
+         if animated {
+             NSAnimationContext.runAnimationGroup { ctx in
+                 ctx.duration = 0.4
+@@ -107,7 +101,7 @@ final class OverlayView: NSView {
+         }
+     }
+ 
+-    /// Fade out (0.6 s), then hide and drop every animation.
++    /// Fade out (0.6 s) into the guest's picture, then hide.
+     func hide(animated: Bool = true, completion: (() -> Void)? = nil) {
+         guard shown, !fading else { completion?(); return }
+         let finish = { [weak self] in
+@@ -115,7 +109,7 @@ final class OverlayView: NSView {
+             self.fading = false
+             guard !self.shown else { return }
+             self.isHidden = true
+-            self.stopAnimations()
++            for l in [self.layer!] + self.layer!.sublayers! { l.removeAllAnimations() }
+             completion?()
+         }
+         shown = false
+@@ -134,87 +128,31 @@ final class OverlayView: NSView {
+ 
+     /// True when hidden and idle (no layer animations running).
+     var isIdle: Bool {
+-        isHidden && ([layer!] + layer!.sublayers! + track.sublayers!).allSatisfy { ($0.animationKeys() ?? []).isEmpty }
+-    }
+-
+-    private func startAnimations() {
+-        let a = CABasicAnimation(keyPath: "position.x")
+-        a.fromValue = -bounds.width * 0.6
+-        a.toValue = bounds.width * 1.6
+-        a.duration = 7
+-        a.repeatCount = .infinity
+-        a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+-        sheen.add(a, forKey: "sheen")
+-        let g = CABasicAnimation(keyPath: "shadowRadius")
+-        g.fromValue = 12 * scaleFactor
+-        g.toValue = 22 * scaleFactor
+-        g.duration = 2.4
+-        g.autoreverses = true
+-        g.repeatCount = .infinity
+-        wordmark.add(g, forKey: "glow")
+-        updateIndeterminate()
+-    }
+-
+-    private func stopAnimations() {
+-        sheen.removeAllAnimations()
+-        wordmark.removeAllAnimations()
+-        fill.removeAllAnimations()
+-        for l in [layer!] + layer!.sublayers! { l.removeAllAnimations() }
++        isHidden && ([layer!] + layer!.sublayers!).allSatisfy { ($0.animationKeys() ?? []).isEmpty }
+     }
+ 
+     // MARK: content
+ 
+     func update(_ s: ProgressState) {
+-        let wasIndeterminate = state.indeterminate
+         state = s
+         guard shown else { return }
+-        apply(s, animated: true)
+-        if wasIndeterminate != s.indeterminate { updateIndeterminate() }
++        apply(s)
+     }
+ 
+-    private var scaleFactor: CGFloat { max(0.55, min(bounds.width / 1280, bounds.height / 800)) }
+-
+-    private func attributed(_ text: String, size: CGFloat, weight: NSFont.Weight, color: CGColor, kern: CGFloat = 0,
+-                            monospacedDigits: Bool = false) -> NSAttributedString {
+-        let font = monospacedDigits ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+-                                    : NSFont.systemFont(ofSize: size, weight: weight)
+-        return NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color, .kern: kern])
+-    }
+-
+-    private func apply(_ s: ProgressState, animated: Bool) {
+-        let k = scaleFactor
+-        CATransaction.begin()
+-        CATransaction.setDisableActions(!animated)
+-        CATransaction.setAnimationDuration(0.35)
+-        titleLayer.string = attributed(s.title, size: 19 * k, weight: .semibold, color: OverlayView.color(0xc7d5e0))
+-        detailLayer.string = attributed(s.detail, size: 12.5 * k, weight: .regular, color: OverlayView.color(0x8f98a0))
+-        track.isHidden = s.stageId == "boot-failed"
+-        percentLayer.string = attributed(s.indeterminate || s.stageId == "boot-failed" ? "" : "\(Int((s.fraction * 100).rounded(.down)))%",
+-                                         size: 13 * k, weight: .medium, color: OverlayView.color(0x66c0f4), monospacedDigits: true)
+-        if !s.indeterminate {
+-            fill.bounds.size.width = track.bounds.width * CGFloat(max(0, min(1, s.fraction)))
+-        }
+-        CATransaction.commit()
++    private func attributed(_ text: String, size: CGFloat, weight: NSFont.Weight, color: CGColor) -> NSAttributedString {
++        NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color])
+     }
+ 
+-    private func updateIndeterminate() {
+-        fill.removeAnimation(forKey: "indeterminate")
++    /// Text only for a boot that failed.
++    private func apply(_ s: ProgressState) {
++        let failed = s.stageId == "boot-failed"
+         CATransaction.begin()
+         CATransaction.setDisableActions(true)
+-        if state.indeterminate {
+-            fill.bounds.size.width = track.bounds.width * 0.28
+-            if shown {
+-                let a = CABasicAnimation(keyPath: "position.x")
+-                a.fromValue = -track.bounds.width * 0.28
+-                a.toValue = track.bounds.width
+-                a.duration = 1.4
+-                a.repeatCount = .infinity
+-                a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+-                fill.add(a, forKey: "indeterminate")
+-            }
+-        } else {
+-            fill.position = CGPoint(x: 0, y: track.bounds.midY)
+-            fill.bounds.size.width = track.bounds.width * CGFloat(max(0, min(1, state.fraction)))
++        titleLayer.isHidden = !failed
++        detailLayer.isHidden = !failed
++        if failed {
++            titleLayer.string = attributed(s.title, size: 17, weight: .semibold, color: OverlayView.color(0xe0e0e0))
++            detailLayer.string = attributed(s.detail, size: 12.5, weight: .regular, color: OverlayView.color(0x9a9a9a))
+         }
+         CATransaction.commit()
+     }
+@@ -227,38 +165,21 @@ final class OverlayView: NSView {
+     override func layout() {
+         super.layout()
+         let b = bounds
+-        let k = scaleFactor
+         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+         CATransaction.begin()
+         CATransaction.setDisableActions(true)
+-        for l in [layer!] + layer!.sublayers! + [fill] { l.contentsScale = scale }
+-        background.frame = b
+-        let glowSize = CGSize(width: 900 * k, height: 520 * k)
+-        glow.frame = CGRect(x: b.midX - glowSize.width / 2, y: b.midY + 40 * k - glowSize.height / 2,
+-                            width: glowSize.width, height: glowSize.height)
+-        sheen.bounds = CGRect(x: 0, y: 0, width: b.width * 0.35, height: b.height * 2.2)
+-        sheen.position = CGPoint(x: -b.width, y: b.midY)
+-
+-        let wmHeight = 64 * k
+-        wordmark.string = attributed("FX STEAM LAUNCHER", size: 46 * k, weight: .heavy, color: OverlayView.color(0xffffff), kern: 9 * k)
+-        wordmark.frame = CGRect(x: 0, y: b.midY + 46 * k, width: b.width, height: wmHeight)
+-        wordmark.shadowRadius = 16 * k
+-        titleLayer.frame = CGRect(x: 40 * k, y: b.midY + 4 * k, width: b.width - 80 * k, height: 28 * k)
+-        let barWidth = min(560 * k, b.width * 0.72)
+-        let barHeight = max(4, 6 * k)
+-        track.frame = CGRect(x: b.midX - barWidth / 2, y: b.midY - 26 * k, width: barWidth, height: barHeight)
+-        track.cornerRadius = barHeight / 2
+-        fill.cornerRadius = barHeight / 2
+-        fill.bounds = CGRect(x: 0, y: 0, width: fill.bounds.width, height: barHeight)
+-        fill.position = CGPoint(x: 0, y: barHeight / 2)
+-        percentLayer.frame = CGRect(x: track.frame.maxX - 120 * k, y: track.frame.maxY + 6 * k, width: 120 * k, height: 18 * k)
+-        detailLayer.frame = CGRect(x: 40 * k, y: track.frame.minY - 30 * k, width: b.width - 80 * k, height: 18 * k)
+-        footer.string = attributed(OverlayView.gpuFooter, size: 11.5 * k, weight: .regular,
+-                                   color: OverlayView.color(0x5c6670), kern: 0.6 * k)
+-        footer.frame = CGRect(x: 0, y: 22 * k, width: b.width, height: 18 * k)
++        for l in [layer!] + layer!.sublayers! { l.contentsScale = scale }
++        let side = (min(b.width, b.height) * 0.16).rounded()
++        let frame = CGRect(x: (b.midX - side / 2).rounded(), y: (b.midY - side / 2).rounded(), width: side, height: side)
++        var t = CGAffineTransform(scaleX: side, y: side)
++        for (l, p) in [(snowflake, OverlayView.snowflakePaths.light), (snowflakeDark, OverlayView.snowflakePaths.dark)] {
++            l.frame = frame
++            l.path = p.copy(using: &t)
++        }
++        titleLayer.frame = CGRect(x: 40, y: frame.minY - 48, width: b.width - 80, height: 24)
++        detailLayer.frame = CGRect(x: 40, y: frame.minY - 110, width: b.width - 80, height: 56)
+         CATransaction.commit()
+-        apply(state, animated: false)
+-        if shown { startAnimations() }
++        apply(state)
+     }
+ 
+     /// Render the overlay (model values) into a context at `scale` pixels per point.
+diff --git a/host/launcher/Sources/steamac-vm/OverlaySelfTest.swift b/host/launcher/Sources/steamac-vm/OverlaySelfTest.swift
+index e99539d..8f3b515 100644
+--- a/host/launcher/Sources/steamac-vm/OverlaySelfTest.swift
++++ b/host/launcher/Sources/steamac-vm/OverlaySelfTest.swift
+@@ -155,8 +155,8 @@ enum OverlaySelfTest {
+ 
+     static let windowTitleForTest = "FX Steam Launcher"
+ 
+-    /// Overlay visible → background is the dark gradient where the guest frame is red;
+-    /// hidden → the guest frame shows. Determinate bar: blue fill left of the fraction, track right of it.
++    /// Overlay visible → black where the guest frame is red, the snowflake in the middle;
++    /// hidden → the guest frame shows.
+     static func pixelChecks(_ name: String, _ img: CGImage, _ wc: WindowController, _ s: ProgressState) -> [String] {
+         guard let px = pixels(img) else { return ["\(name): cannot read pixels"] }
+         let scale = CGFloat(img.width) / wc.overlay.bounds.width
+@@ -170,13 +170,13 @@ enum OverlaySelfTest {
+         let probe = at(CGPoint(x: b.width * 0.08, y: b.height * 0.85))   // guest frame: red quadrant
+         if wc.overlay.shown {
+             if probe.0 > 60 { f.append("\(name): overlay should cover the guest frame, got \(probe)") }
+-            if !s.indeterminate && s.fraction > 0.1 && s.fraction < 0.9 {
+-                let bar = wc.overlay.barFrame
+-                let filled = at(CGPoint(x: bar.minX + bar.width * CGFloat(s.fraction) * 0.5, y: bar.midY))
+-                let empty = at(CGPoint(x: bar.minX + bar.width * (CGFloat(s.fraction) + 1) / 2, y: bar.midY))
+-                if filled.2 < 150 { f.append("\(name): bar fill not blue at \(Int(s.fraction * 50))%: \(filled)") }
+-                if empty.2 > 120 { f.append("\(name): bar should be empty past the fraction: \(empty)") }
+-            }
++            // Quiet boot (nixos-gpu-vm): the snowflake's centre is the black hole between its lambdas,
++            // and there is no progress bar.
++            let logo = wc.overlay.barFrame
++            let hole = at(CGPoint(x: logo.midX, y: logo.midY))
++            if hole.0 + hole.1 + hole.2 > 30 { f.append("\(name): snowflake's centre should be black, got \(hole)") }
++            let lambda = at(CGPoint(x: logo.minX + logo.width * 0.06, y: logo.midY))
++            if lambda.2 < 150 { f.append("\(name): no snowflake at its left tip, got \(lambda)") }
+         } else if probe.0 < 200 || probe.1 > 60 {
+             f.append("\(name): hidden overlay should reveal the guest frame (red), got \(probe)")
+         }
+diff --git a/host/launcher/Sources/steamac-vm/PillSelfTest.swift b/host/launcher/Sources/steamac-vm/PillSelfTest.swift
+index b963699..a2c0d76 100644
+--- a/host/launcher/Sources/steamac-vm/PillSelfTest.swift
++++ b/host/launcher/Sources/steamac-vm/PillSelfTest.swift
+@@ -112,6 +112,8 @@ enum PillSelfTest {
+             return text.range(of: pattern, options: .regularExpression) != nil
+         }
+         func expectPill(_ t: String, detail: String, percent: Bool) -> String? {
++            // Quiet boot (nixos-gpu-vm): no progress pill while booting or shutting down.
++            if progress.state.phase != .running { return expectNoPill("quiet boot") ?? (wc.overlay.shown ? "expected no overlay" : nil) }
+             guard pill.shown, !wc.overlay.shown else { return "expected the pill (overlay \(wc.overlay.shown), pill \(pill.shown))" }
+             let c = pill.content
+             guard c.title == t else { return "pill title \"\(c.title)\", expected \"\(t)\"" }
+@@ -171,7 +173,7 @@ enum PillSelfTest {
+                 expectPill(downloading, detail: "501 / 564 MB · 3.8 MB/s", percent: true)
+                     ?? expectTitle(String(localized: "\(downloading) \(overallPercent())%"))
+             },
+-            Step(name: "07-pill-click-expands", action: { click(pillCenter()) }, wait: 0.7) {
++            Step(name: "07-menu-expands", action: { wc.toggleOverlay() }, wait: 0.7) {   // no pill to click (quiet boot)
+                 expectOverlay()
+             },
+             Step(name: "08-menu-collapses", action: { wc.toggleOverlay() }, wait: 0.7) {
+@@ -182,7 +184,7 @@ enum PillSelfTest {
+                 guest("stage steam-start -1 Starting Steam")
+             }, wait: 0.7) {
+                 expectPill(starting, detail: "", percent: false) ?? expectTitle(starting + "…")
+-                    ?? (pill.content.indeterminate ? nil : "pill should be indeterminate")
++                    ?? (progress.state.indeterminate ? nil : "the progress should be indeterminate")
+             },
+             Step(name: "09b-menu-expands-at-start", action: { wc.toggleOverlay() }, wait: 0.7) {
+                 expectOverlay()
+diff --git a/host/launcher/Sources/steamac-vm/Window.swift b/host/launcher/Sources/steamac-vm/Window.swift
+index c81905e..615d3da 100644
+--- a/host/launcher/Sources/steamac-vm/Window.swift
++++ b/host/launcher/Sources/steamac-vm/Window.swift
+@@ -473,7 +473,8 @@ final class WindowController: NSObject, NSWindowDelegate {
+         if overlay.shown {
+             content = nil
+         } else if let p = progress?.state, p.phase != .running {
+-            content = ProgressPillView.Content(p)
++            // Quiet boot (nixos-gpu-vm): no progress pill; only a failed boot says so.
++            content = p.stageId == "boot-failed" ? ProgressPillView.Content(p) : nil
+         } else if let r = noPictureReport {
+             content = ProgressPillView.Content(title: r.title, detail: r.detail, fraction: nil)
+         } else {

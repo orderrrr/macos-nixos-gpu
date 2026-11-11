@@ -1,13 +1,14 @@
 # Base config, on top of Noctalia's defaults. The settings UI saves its changes to the persisted
 # ~/.local/state/noctalia/settings.toml, which overrides this file.
 
-# Noctalia's default bar without network, bluetooth, brightness and battery (the VM has no
-# network manager, Bluetooth, backlight or battery), and without the wallpaper picker: the
-# wallpaper is set declaratively (wallpaper.toml, from default.nix).
+# Noctalia's default bar without network, bluetooth and brightness (the VM has no network
+# manager, Bluetooth or backlight: the Mac's Wi-Fi, Bluetooth and Night Shift are in "mac",
+# features/omacvm-bridge; the battery is the Mac's, features/omacvm-devices), and without the
+# wallpaper picker: the wallpaper is set declaratively (wallpaper.toml, from default.nix).
 [bar.default]
 start = ["launcher", "workspaces"]
 center = ["clock"]
-end = ["tray", "notifications", "clipboard", "volume", "control-center", "session"]
+end = ["tray", "mac", "battery", "notifications", "clipboard", "volume", "control-center", "session"]
 background_opacity = 0.8 # niri blurs and grains behind it
 
 # Apps from the launcher run as their own transient units, so they survive Noctalia exiting

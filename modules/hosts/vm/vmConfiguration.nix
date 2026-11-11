@@ -16,7 +16,17 @@ _: {
 
       # libkrun boots the raw Image + initrd directly.
       boot.loader.grub.enable = false;
-      boot.kernelParams = [ "console=hvc0" ];
+      boot.kernelParams = [
+        "console=hvc0"
+        # glibc 2.44 madvises malloc heaps for 2 MB huge pages, which held 352 of 546 MB of
+        # anon memory on the desktop (each fish shell ~10 MB) for no felt speedup.
+        "transparent_hugepage=never"
+        # Idle wakeups, each a VM exit the Mac pays for: virtio-gpu's vblank is a timer at the
+        # display's rate that DRM keeps running 5 s after every frame (100 ms here, as omacvm),
+        # and RCU's callbacks are batched (the kernel's RCU_LAZY, which needs them offloaded).
+        "drm.vblankoffdelay=100"
+        "rcu_nocbs=all"
+      ];
 
       # Impermanence (features/impermanence): `/` starts empty every boot. The disk holds the
       # store (and the system profiles the kernel boots) and /persist.
@@ -74,14 +84,24 @@ _: {
         echo "init=/nix/var/nix/profiles/system/init ${toString config.boot.kernelParams}" > $out/cmdline
       '';
 
-      # The launcher covers the screen with its boot overlay until the guest reports ready
-      # (its SteamOS agent normally does), so report it once the console login has started.
-      systemd.services.steamac-ready = {
-        wantedBy = [ "multi-user.target" ];
-        after = [ "getty@tty1.service" ];
+      # The launcher covers the screen with its boot screen until the guest reports ready (its
+      # SteamOS agent normally does): reported once niri and its bar are up, so the boot screen
+      # fades straight into the desktop.
+      systemd.user.services.boot-ready = {
+        # Not graphical-session.target: a target orders itself after what it wants, and noctalia
+        # comes after the target, a cycle in which systemd drops this unit.
+        wantedBy = [ "noctalia.service" ];
+        after = [
+          "niri.service"
+          "noctalia.service"
+        ];
+        unitConfig.ConditionPathExists = "/dev/virtio-ports/fx.progress";
         serviceConfig.Type = "oneshot";
         script = "echo ready > /dev/virtio-ports/fx.progress";
       };
+      services.udev.extraRules = ''
+        SUBSYSTEM=="virtio-ports", ATTR{name}=="fx.progress", MODE="0666"
+      '';
 
       services.openssh.enable = true; # the launcher forwards 127.0.0.1:2222 to the guest's :22
 

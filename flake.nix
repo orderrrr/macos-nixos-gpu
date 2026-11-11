@@ -18,6 +18,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     nixpkgs.url = "github:NixOS/nixpkgs/f4a03c008967841f2a0b3cb7c436fc6fc31671f6";
+    omacvm = {
+      url = "github:gillesgoetsch/omacvm/ebe2cbb15ddd7b2ee644b4ebcb9a0b2b87469e0f";
+      flake = false;
+    };
     steamac = {
       url = "github:fxgl/steamac/407fb58b7459c65f49a7c65ddb875718a093f43b";
       flake = false;

@@ -1,0 +1,53 @@
+From 08caec5eb80cd9e555ac807c1121989121c5a133 Mon Sep 17 00:00:00 2001
+From: nmcintosh <nathanielstewartmcintosh@gmail.com>
+Date: Wed, 11 Nov 2026 23:13:15 +0200
+Subject: [PATCH 3/3] launcher: no telemetry by default: crash reports off, no
+ game statistics service
+
+Send crash reports and diagnostics is off unless switched on (local crash logs stay),
+and this build names no game statistics service, so nothing is uploaded.
+---
+ host/launcher/Info.plist                              | 2 --
+ host/launcher/Sources/steamac-vm/CrashReporting.swift | 2 +-
+ host/launcher/Sources/steamac-vm/Settings.swift       | 3 ++-
+ 3 files changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/host/launcher/Info.plist b/host/launcher/Info.plist
+index a8eac87..6ed1d28 100644
+--- a/host/launcher/Info.plist
++++ b/host/launcher/Info.plist
+@@ -50,7 +50,5 @@
+     <array>
+         <string>_nvstream._tcp</string>
+     </array>
+-    <key>SteamacGameStatsURL</key>
+-    <string>https://steamac-game-stats.steamac-game-stats.workers.dev</string>
+ </dict>
+ </plist>
+diff --git a/host/launcher/Sources/steamac-vm/CrashReporting.swift b/host/launcher/Sources/steamac-vm/CrashReporting.swift
+index 958da12..41b31eb 100644
+--- a/host/launcher/Sources/steamac-vm/CrashReporting.swift
++++ b/host/launcher/Sources/steamac-vm/CrashReporting.swift
+@@ -179,7 +179,7 @@ enum CrashReporting {
+     /// The saved setting, read from the defaults store (the supervisor also sees changes the VM
+     /// process's Settings window made).
+     private static var settingAllows: Bool {
+-        LauncherSettings.shared.defaults.object(forKey: LauncherSettings.Key.sendCrashReports.rawValue) as? Bool ?? true
++        LauncherSettings.shared.defaults.object(forKey: LauncherSettings.Key.sendCrashReports.rawValue) as? Bool ?? false   // off by default (nixos-gpu-vm)
+     }
+ 
+     // MARK: setup
+diff --git a/host/launcher/Sources/steamac-vm/Settings.swift b/host/launcher/Sources/steamac-vm/Settings.swift
+index db4a8ce..5a80328 100644
+--- a/host/launcher/Sources/steamac-vm/Settings.swift
++++ b/host/launcher/Sources/steamac-vm/Settings.swift
+@@ -312,7 +312,8 @@ final class LauncherSettings: ObservableObject {
+     @Published var openFullscreen = false { didSet { save(.openFullscreen, openFullscreen) } }
+     @Published var perfStats = false { didSet { save(.perfStats, perfStats) } }
+     /// Crash reports and diagnostics through Sentry (CrashReporting); applies now.
+-    @Published var sendCrashReports = true { didSet { save(.sendCrashReports, sendCrashReports) } }
++    // Off by default in nixos-gpu-vm: no uploads unless switched on (local crash logs stay).
++    @Published var sendCrashReports = false { didSet { save(.sendCrashReports, sendCrashReports) } }
+     /// While the app is not active: mute the guest's sound / freeze the focused game.
+     @Published var muteInBackground = true { didSet { save(.muteInBackground, muteInBackground) } }
+     @Published var pauseInBackground = false { didSet { save(.pauseInBackground, pauseInBackground) } }

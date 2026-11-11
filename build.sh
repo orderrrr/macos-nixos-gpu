@@ -26,8 +26,15 @@ done
 [ -d "$steamac/.git" ] || git clone https://github.com/fxgl/steamac "$steamac"
 git -C "$steamac" cat-file -e "$rev^{commit}" 2> /dev/null || git -C "$steamac" fetch origin
 git -C "$steamac" checkout -q "$rev"
-# Ours after steamac's: its libkrun build applies host/libkrun/patches/*.patch in order.
+# Ours after steamac's: its libkrun and KosmicKrisp builds apply their patches/*.patch in order.
 cp "$here"/modules/hosts/vm/libkrun/*.patch "$steamac/host/libkrun/patches/"
+cp "$here"/modules/hosts/vm/kosmickrisp/*.patch "$steamac/host/kosmickrisp/patches/"
+# Ours on steamac's launcher (Swift), in order: OmacVM's Mac side (battery, media, camera,
+# Touch ID ports), full screen over the notch, quiet boot. Applied to a clean launcher tree, so
+# re-running starts again from steamac's own sources.
+git -C "$steamac" checkout -q "$rev" -- host/launcher
+git -C "$steamac" clean -fq -- host/launcher/Sources/steamac-vm
+git -C "$steamac" apply "$here"/modules/hosts/vm/launcher/*.patch
 
 # steamac's patch merging expects plain two-sided conflict markers (a global zdiff3 breaks it);
 # libkrun needs Homebrew's keg-only rustup and macOS's own mv ahead of GNU coreutils.

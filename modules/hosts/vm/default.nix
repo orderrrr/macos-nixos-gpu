@@ -16,8 +16,15 @@
       niri
       noctalia
       steamac-agent
+      omacvm
+      omacvm-battery
+      omacvm-camera
+      omacvm-gestures
+      omacvm-notch
+      omacvm-touchid
       mac-share
       ghostty
+      btop
       zen
       development
       impermanence

@@ -1,0 +1,17 @@
+// The virtual touchpad omacvm-gestures makes is the VM's only touchpad, so niri's touchpad
+// section is its own. niri's gestures need nothing more: three fingers sideways scroll the
+// columns, up and down switch workspaces, four fingers up and down open and close the overview.
+//
+// This section replaces the default config's whole (niri doesn't merge pointing devices), which
+// drops its tap: taps and clicks come through the VM's pointer, as macOS's settings make them,
+// and the two still fingers that begin a pinch would be a two-finger tap, a right click.
+input {
+    touchpad {
+        // The daemon turns the Mac's scrolling direction into this one.
+        natural-scroll
+        // With scroll momentum the scroll already carries macOS's acceleration.
+        accel-profile "flat"
+        // omacvm's tuning against macOS on a MacBook Pro 16", for display scale 2: 2.16 / scale.
+        scroll-factor 1.08
+    }
+}

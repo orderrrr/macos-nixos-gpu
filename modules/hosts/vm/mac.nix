@@ -13,7 +13,7 @@ _: {
         # to the Mac, so the builder collects garbage early (under 5 GiB free, up to 15).
         darwin-builder = {
           memorySize = 16 * 1024;
-          diskSize = 40 * 1024;
+          diskSize = 80 * 1024;
           min-free = 5 * 1024 * 1024 * 1024;
           max-free = 15 * 1024 * 1024 * 1024;
         };

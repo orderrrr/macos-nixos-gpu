@@ -1,0 +1,2688 @@
+From 8b2a15d9a5fa4a968d20a83797e94469e7e9a375 Mon Sep 17 00:00:00 2001
+From: nmcintosh <nathanielstewartmcintosh@gmail.com>
+Date: Wed, 11 Nov 2026 23:06:16 +0200
+Subject: [PATCH 1/3] launcher: OmacVM's Mac side for the guest's org.omacvm.*
+ agents, full screen over the notch
+
+Ports org.omacvm.battery, org.omacvm.media, org.omacvm.camera and org.omacvm.auth
+(libkrun virtio-console ports on a socketpair) with OmacVM.app's bridges ported from
+github.com/gillesgoetsch/omacvm (MIT): the Mac's battery, AirPods/Now Playing media
+controls, the camera (NV12 frames on demand) and the Touch ID relay to OmacVM Bridge.
+Protocols unchanged. Each one can be left out: --no-omacvm-battery, --no-omacvm-media,
+--no-omacvm-camera, --no-touchid.
+
+FullPanel: on a MacBook with a notch, a boot that opens full screen on the built-in
+display covers the whole panel (AppKit's menu bar reservation answered no for the VM
+window, the menu bar backdrop transparent, menu bar and Dock held back) and the guest
+gets omacvm.fullpanel=LxRxHxWxD on its command line. --no-fullpanel turns it off.
+---
+ host/launcher/Info.plist                      |   2 +
+ .../Sources/steamac-vm/FullPanel.swift        | 184 ++++++
+ .../Sources/steamac-vm/OmacAuth.swift         | 426 +++++++++++++
+ .../Sources/steamac-vm/OmacCamera.swift       | 568 ++++++++++++++++++
+ .../Sources/steamac-vm/OmacHostBattery.swift  | 196 ++++++
+ .../Sources/steamac-vm/OmacMediaClaim.swift   | 340 +++++++++++
+ .../steamac-vm/OmacMediaProtocol.swift        | 251 ++++++++
+ host/launcher/Sources/steamac-vm/OmacVM.swift | 458 ++++++++++++++
+ .../launcher/Sources/steamac-vm/Options.swift |  19 +
+ host/launcher/Sources/steamac-vm/VM.swift     |   8 +-
+ host/launcher/Sources/steamac-vm/Window.swift |  18 +
+ host/launcher/Sources/steamac-vm/main.swift   |  10 +-
+ 12 files changed, 2477 insertions(+), 3 deletions(-)
+ create mode 100644 host/launcher/Sources/steamac-vm/FullPanel.swift
+ create mode 100644 host/launcher/Sources/steamac-vm/OmacAuth.swift
+ create mode 100644 host/launcher/Sources/steamac-vm/OmacCamera.swift
+ create mode 100644 host/launcher/Sources/steamac-vm/OmacHostBattery.swift
+ create mode 100644 host/launcher/Sources/steamac-vm/OmacMediaClaim.swift
+ create mode 100644 host/launcher/Sources/steamac-vm/OmacMediaProtocol.swift
+ create mode 100644 host/launcher/Sources/steamac-vm/OmacVM.swift
+
+diff --git a/host/launcher/Info.plist b/host/launcher/Info.plist
+index fed52cb..a8eac87 100644
+--- a/host/launcher/Info.plist
++++ b/host/launcher/Info.plist
+@@ -40,6 +40,8 @@
+     <true/>
+     <key>LSSupportsGameMode</key>
+     <true/>
++    <key>NSCameraUsageDescription</key>
++    <string>Linux apps in the virtual machine use the Mac's camera while they read it (org.omacvm.camera).</string>
+     <key>NSMicrophoneUsageDescription</key>
+     <string>The SteamOS virtual machine records from the microphone while a game or Steam voice chat in it uses one.</string>
+     <key>NSLocalNetworkUsageDescription</key>
+diff --git a/host/launcher/Sources/steamac-vm/FullPanel.swift b/host/launcher/Sources/steamac-vm/FullPanel.swift
+new file mode 100644
+index 0000000..4945229
+--- /dev/null
++++ b/host/launcher/Sources/steamac-vm/FullPanel.swift
+@@ -0,0 +1,184 @@
++// Full screen including the notch, as OmacVM.app's FullPanel (github.com/gillesgoetsch/omacvm,
++// MIT, (c) 2026 Gilles Goetsch: NotchGeometry from app/app/Sources/OmacVMFeatures/NotchArea.swift,
++// the approach of app/runtime/patches/omacvm-cocoa-fullpanel.patch, rewritten in Swift for this
++// window and much smaller): on a MacBook with a notch, the VM window's full screen covers the
++// whole built-in panel, the strip beside the camera included, in a Space of its own with the menu
++// bar and the Dock held back. The guest's display follows the window (WindowController), so it
++// gets the whole panel; where the notch is goes to the guest before boot on the kernel command
++// line as omacvm.fullpanel=LxRxHxWxD (points), which its bar reads.
++//
++// How: AppKit's full-screen content controller asks whether the window keeps the menu bar's band
++// free (-[_NSFullScreenContentController reservesSpaceForMenuBarInFullScreen]); for the VM window
++// in such a full screen the answer becomes no, and AppKit lays the window out over the whole
++// display itself. The menu bar's backdrop over that full-screen Space is made transparent
++// (SkyLight), and the presentation options hide the menu bar and the Dock (omacvm's "Keep the Dock
++// away", its default). Anything missing (the private class, method or SkyLight functions) gives
++// normal full screen, logged.
++import AppKit
++import ObjectiveC
++
++/// The camera housing of the built-in display, in macOS points (omacvm's NotchGeometry).
++struct NotchGeometry: Equatable {
++    var left: Double
++    var right: Double
++    var strip: Double
++    var width: Double
++    var height: Double
++
++    /// The strip's height as Omanotch sees it: the menu bar's height beside the notch, at least a
++    /// little more than the camera housing when the menu bar hides itself.
++    static func strip(menuBar: Double, safeTop: Double) -> Double { max(menuBar, safeTop + 1.5) }
++
++    /// Numbers a notched MacBook can have (anything else: no FullPanel).
++    var valid: Bool {
++        [left, right, strip, width, height].allSatisfy { $0.isFinite } &&
++            left > 0 && right > left && right < width && right - left < width / 3 &&
++            strip >= 10 && strip <= 100 && width >= 800 && height > strip * 5
++    }
++
++    /// "LxRxHxWxD", one decimal, no spaces.
++    var text: String { [left, right, strip, width, height].map { String(format: "%.1f", $0) }.joined(separator: "x") }
++
++    /// The built-in display's housing now (omacvm's Mac.notchGeometry); nil without one.
++    static func of(_ s: NSScreen) -> NotchGeometry? {
++        guard let id = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
++              CGDisplayIsBuiltin(id) != 0,
++              let l = s.auxiliaryTopLeftArea, let r = s.auxiliaryTopRightArea, s.safeAreaInsets.top > 0 else { return nil }
++        let f = s.frame
++        let g = NotchGeometry(left: Double(l.maxX - f.minX), right: Double(r.minX - f.minX),
++                              strip: strip(menuBar: Double(max(0, f.maxY - s.visibleFrame.maxY)), safeTop: Double(s.safeAreaInsets.top)),
++                              width: Double(f.width), height: Double(f.height))
++        return g.valid ? g : nil
++    }
++}
++
++enum FullPanel {
++    /// This boot's notch (the guest has it on its command line); nil: normal full screen.
++    private(set) static var geometry: NotchGeometry?
++
++    /// Before the VM is configured: FullPanel for this boot when it is on (--no-fullpanel), the
++    /// window opens full screen (Settings > General) and the screen it opens on is the built-in
++    /// one with a notch. Returns the kernel parameter to add.
++    static func prepare(_ o: Options) -> String? {
++        guard o.fullPanel, o.fullscreen, !o.headless else { return nil }
++        _ = SteamacApplication.shared   // NSScreen needs the window server connection (and NSApp is ours)
++        guard let screen = WindowController.targetScreen(), let g = NotchGeometry.of(screen) else {
++            log("full panel: off (the window does not open full screen on a built-in display with a notch)")
++            return nil
++        }
++        guard installReservation() else { return nil }
++        geometry = g
++        log(String(format: "full panel: on: notch %.1f-%.1f, strip %.1f of %.0fx%.0f points", g.left, g.right, g.strip, g.width, g.height))
++        return "omacvm.fullpanel=" + g.text
++    }
++
++    /// The VM window (WindowController sets it); only it gets the whole panel.
++    static weak var window: NSWindow?
++
++    /// The window is (going) full screen on a display with a notch, in a FullPanel boot.
++    static func claims(_ w: NSWindow?) -> Bool {
++        guard geometry != nil, let w, w === window, let s = w.screen else { return false }
++        return s.safeAreaInsets.top > 0
++    }
++
++    /// The presentation options of the full screen (NSWindowDelegate's
++    /// willUseFullScreenPresentationOptions): menu bar and Dock held back.
++    static func options(_ w: NSWindow, proposed: NSApplication.PresentationOptions) -> NSApplication.PresentationOptions {
++        guard claims(w) else { return proposed }
++        return proposed.subtracting([.autoHideDock, .autoHideMenuBar]).union([.hideDock, .hideMenuBar])
++    }
++
++    /// After entering full screen and whenever the window's Space comes back (Mission Control,
++    /// Spaces, Command-Tab): the menu bar's backdrop over its Space transparent, the options held.
++    static func reassert(_ w: NSWindow) {
++        guard claims(w), w.styleMask.contains(.fullScreen) else { return }
++        if w.frame != w.screen?.frame {
++            log("full panel: the window does not cover its display (\(NSStringFromRect(w.frame))): normal full screen this time")
++            return
++        }
++        let want: NSApplication.PresentationOptions = [.fullScreen, .hideDock, .hideMenuBar]
++        if NSApp.isActive && NSApp.presentationOptions != want { NSApp.presentationOptions = want }
++        if let space = SkyLight.fullScreenSpace(of: w) { SkyLight.menuBarBackdrop(space: space, alpha: 0) }
++    }
++
++    // MARK: AppKit's reservation question
++
++    private static var reservationInstalled = false
++
++    private static func installReservation() -> Bool {
++        if reservationInstalled { return true }
++        guard let cls = objc_getClass("_NSFullScreenContentController") as? AnyClass else {
++            log("full panel: no _NSFullScreenContentController: normal full screen")
++            return false
++        }
++        let reservesSel = sel_registerName("reservesSpaceForMenuBarInFullScreen")
++        let windowSel = sel_registerName("window")
++        guard let reserves = class_getInstanceMethod(cls, reservesSel), let windowOf = class_getInstanceMethod(cls, windowSel),
++              String(cString: method_getTypeEncoding(reserves)!) == "B16@0:8",
++              String(cString: method_getTypeEncoding(windowOf)!) == "@16@0:8" else {
++            log("full panel: _NSFullScreenContentController's methods changed: normal full screen")
++            return false
++        }
++        typealias BoolFn = @convention(c) (AnyObject, Selector) -> Bool
++        typealias ObjectFn = @convention(c) (AnyObject, Selector) -> AnyObject?
++        let appkit = unsafeBitCast(method_getImplementation(reserves), to: BoolFn.self)
++        let windowGet = unsafeBitCast(method_getImplementation(windowOf), to: ObjectFn.self)
++        let block: @convention(block) (AnyObject) -> Bool = { controller in
++            let keeps = appkit(controller, reservesSel)
++            guard keeps, Thread.isMainThread else { return keeps }
++            return MainActor.assumeIsolated { claims(windowGet(controller, windowSel) as? NSWindow) } ? false : keeps
++        }
++        method_setImplementation(reserves, imp_implementationWithBlock(block))
++        reservationInstalled = true
++        return true
++    }
++}
++
++/// The SkyLight functions FullPanel needs, looked up once; nil when any is missing.
++private enum SkyLight {
++    typealias NewTransaction = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
++    typealias MenuBarAlpha = @convention(c) (CFTypeRef, UInt64, Float) -> Void
++    typealias Commit = @convention(c) (CFTypeRef, Int32) -> Void
++    typealias Connection = @convention(c) () -> Int32
++    typealias WindowSpaces = @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
++    typealias SpaceType = @convention(c) (Int32, UInt64) -> Int32
++
++    struct Functions {
++        let newTransaction: NewTransaction, menuBarAlpha: MenuBarAlpha, commit: Commit
++        let connection: Connection, windowSpaces: WindowSpaces, spaceType: SpaceType
++    }
++
++    static let fns: Functions? = {
++        guard let lib = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY | RTLD_LOCAL) else {
++            log("full panel: no SkyLight: the menu bar's backdrop stays")
++            return nil
++        }
++        func sym<T>(_ name: String, _: T.Type) -> T? {
++            guard let p = dlsym(lib, name) else { log("full panel: no \(name): the menu bar's backdrop stays"); return nil }
++            return unsafeBitCast(p, to: T.self)
++        }
++        guard let a = sym("SLSTransactionCreate", NewTransaction.self),
++              let b = sym("SLSTransactionSetMenuBarSystemOverrideAlpha", MenuBarAlpha.self),
++              let c = sym("SLSTransactionCommit", Commit.self),
++              let d = sym("SLSMainConnectionID", Connection.self),
++              let e = sym("SLSCopySpacesForWindows", WindowSpaces.self),
++              let f = sym("SLSSpaceGetType", SpaceType.self) else { return nil }
++        return Functions(newTransaction: a, menuBarAlpha: b, commit: c, connection: d, windowSpaces: e, spaceType: f)
++    }()
++
++    /// The one full-screen Space (type 4) that holds the window, or nil.
++    static func fullScreenSpace(of w: NSWindow) -> UInt64? {
++        guard let f = fns, w.windowNumber > 0 else { return nil }
++        let cid = f.connection()
++        let ids = [NSNumber(value: w.windowNumber)] as CFArray
++        guard let spaces = f.windowSpaces(cid, 7, ids)?.takeRetainedValue() as? [NSNumber], spaces.count == 1 else { return nil }
++        let space = spaces[0].uint64Value
++        return f.spaceType(cid, space) == 4 ? space : nil
++    }
++
++    static func menuBarBackdrop(space: UInt64, alpha: Float) {
++        guard let f = fns, let t = f.newTransaction(f.connection())?.takeRetainedValue() else { return }
++        f.menuBarAlpha(t, space, alpha)
++        f.commit(t, 1)   // returns nothing to check (macOS 27)
++    }
++}
+diff --git a/host/launcher/Sources/steamac-vm/OmacAuth.swift b/host/launcher/Sources/steamac-vm/OmacAuth.swift
+new file mode 100644
+index 0000000..27acae4
+--- /dev/null
++++ b/host/launcher/Sources/steamac-vm/OmacAuth.swift
+@@ -0,0 +1,426 @@
++// From OmacVM (github.com/gillesgoetsch/omacvm), MIT, (c) 2026 Gilles Goetsch:
++// app/app/Sources/OmacVMAuth/AuthRelay.swift and BridgeHTTP.swift, without OmacVM.app's own
++// Touch ID panel (the Bridge shows the Mac's dialog), plus the Bridge's headers and relay socket
++// (NativeControlBridge, NativeBridgeSocket). libkrun's port never closes, so run() never returns.
++import Darwin
++import Foundation
++
++/// Touch ID for this app's VMs (docs/adr/0041): the virtio port
++/// org.omacvm.auth carries the VM's PAM client's request to OmacVM Bridge,
++/// which shows the Mac's Touch ID dialog, and the Bridge's signed answer back.
++/// The port is root's alone in the VM (udev, 0600) and is there only when
++/// the VM's features say touch-id=on at its start (MacLinks.touchID).
++///
++/// Lines, one JSON object each. From the VM:
++///   {"op":"touchid","id":N,"auth":"1 T N SIG","proto":1,"body":"<base64>"}
++///   {"op":"ping","id":N}      every half second while it waits
++///   {"op":"cancel","id":N}    it gave up (deadline, Ctrl+C on the way out)
++/// N is the request's nonce (32 hex digits), the same as in the signature.
++/// To the VM, at once: {"ack":true,"id":N} (the app relays: a virtio port
++/// takes writes even with nobody at the Mac end); then: {"id":N,"status":S,"answer":"<X-OmacVM-Answer>","body":"<base64>"}
++/// with the Bridge's body byte for byte (the answer's signature covers it);
++/// status 0: the Bridge did not answer.
++///
++/// The app checks nothing about the signature: the Bridge does, with the
++/// VM's Touch ID key, and the VM checks the answer. The app adds the Bridge
++/// token and the relay key and names the VM (a guest cannot name another).
++///
++/// QEMU's socket does not say when the VM closes the port, so the client
++/// pings: no ping for `pingTimeout`, a cancel, or a new request (the port
++/// has one opener at a time, so the old client is gone) drops the Bridge
++/// connection, and the Bridge closes the dialog (its peerGone).
++public final class AuthRelay: @unchecked Sendable {
++    public static let maximumLineBytes = 4096
++    public static let maximumBodyBytes = 1024
++
++    public struct Request: Equatable {
++        public let id: String, auth: String, proto: Int, body: Data
++    }
++
++    public enum Line: Equatable {
++        case request(Request)
++        case ping(String)
++        case cancel(String)
++    }
++
++    static func isHex(_ s: String, count: Int) -> Bool {
++        s.utf8.count == count && s.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
++    }
++
++    /// One line from the VM, or nil (not one of ours: dropped).
++    public static func parse(_ line: Data) -> Line? {
++        guard line.count <= maximumLineBytes,
++              let o = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
++              let op = o["op"] as? String, let id = o["id"] as? String, isHex(id, count: 32) else { return nil }
++        switch op {
++        case "ping": return .ping(id)
++        case "cancel": return .cancel(id)
++        case "touchid":
++            // "1 <time> <nonce> <hmac>", the nonce the line's id.
++            guard let auth = o["auth"] as? String else { return nil }
++            let f = auth.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
++            guard f.count == 4, f[0] == "1", f[1].utf8.count <= 12, Int64(f[1]) != nil, f[1].utf8.allSatisfy({ (48...57).contains($0) }),
++                  f[2] == id, isHex(f[3], count: 64) else { return nil }
++            guard let b64 = o["body"] as? String, let body = Data(base64Encoded: b64), !body.isEmpty, body.count <= maximumBodyBytes
++            else { return nil }
++            let proto = (o["proto"] as? Int).map { min(max($0, 0), 99) } ?? 1
++            return .request(Request(id: id, auth: auth, proto: proto, body: body))
++        default: return nil
++        }
++    }
++
++    /// The Bridge's answer: status, its X-OmacVM-Answer and the body as sent.
++    public struct Answer: Equatable {
++        public let status: Int, signature: String, body: Data
++        public init(status: Int, signature: String, body: Data) { self.status = status; self.signature = signature; self.body = body }
++    }
++
++    /// One HTTP/1.1 request on the Bridge's relay socket.
++    public static func httpRequest(_ r: Request, headers: [(String, String)]) -> Data {
++        BridgeHTTP.request(method: "POST", path: "/omacvm/touchid",
++                           headers: headers + [("X-OmacVM-Auth", r.auth), ("X-OmacVM-Proto", String(r.proto)), ("Content-Type", "application/json")],
++                           body: r.body)
++    }
++
++    /// The Bridge's answer, or nil (none, cut short, not HTTP, too big).
++    public static func parseResponse(_ data: Data) -> Answer? {
++        guard let r = BridgeHTTP.parse(data), r.body.count <= 4096 else { return nil }
++        var signature = r.headers["x-omacvm-answer"] ?? ""
++        if signature.utf8.count > 128 || !signature.utf8.allSatisfy({ $0 > 0x20 && $0 < 0x7F }) { signature = "" }
++        return Answer(status: r.status, signature: signature, body: r.body)
++    }
++
++    /// The line to the VM; nil answer: status 0.
++    public static func answerLine(id: String, _ a: Answer?) -> Data {
++        var o: [String: Any] = ["id": id, "status": a?.status ?? 0]
++        if let a {
++            o["answer"] = a.signature
++            o["body"] = a.body.base64EncodedString()
++        }
++        var d = (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data("{}".utf8)
++        d.append(0x0A)
++        return d
++    }
++
++    // MARK: The relay
++    //
++    // Threads: run() reads the VM's lines on its own thread and owns the
++    // guest socket (it closes it when it returns). Each request to the Bridge
++    // runs on one exchange thread; `slot` lets only one exist at a time.
++    // Answers to the VM are written under `writeLock`, never longer than
++    // `writeTimeout`.
++
++    private let guest: Int32
++    private let connectBridge: () -> Int32?
++    private let headers: () -> [(String, String)]?
++    private let log: (String) -> Void
++    /// Touch ID is on for this VM now (its features, read per request): off,
++    /// the request never reaches the Bridge. The port is there for every VM
++    /// (3.0.4), so turning Touch ID on needs no restart.
++    private let enabled: () -> Bool
++    public var pingTimeout: TimeInterval = 3
++    /// The Bridge's dialog waits 30 s; the client gives up at 40 s.
++    public var answerTimeout: TimeInterval = 45
++    /// A VM that does not take its answer within this is dropped: its port's
++    /// socket is shut down, and the app connects to it again.
++    public var writeTimeout: TimeInterval = 2
++    /// Requests closer than this get status 0 (the password): no person
++    /// types that fast. The Bridge's own limits come after.
++    public var minimumGap: TimeInterval = 0.2
++    /// How long a new request waits for the one before it to end (dropped, it
++    /// ends at once).
++    public var handoverTimeout: TimeInterval = 1
++    private let lock = NSLock()
++    private var current: (id: String, fd: Int32, lastPing: Date, cancelled: Bool)?
++    private var stopped = false
++    private let slot = DispatchSemaphore(value: 1)
++    private var lastRequest: Date?   // run()'s thread only
++    private let writeLock = NSLock()
++    private var closed = false   // the guest's socket (under writeLock: no write or shutdown after the close)
++
++    /// `guest`: the connected chardev socket; run() closes it. `connectBridge`:
++    /// a connected socket to the Bridge, or nil. `headers`: the app's own
++    /// headers (token, relay key, VM name), or nil when the Bridge is not set up.
++    public init(guest: Int32, connectBridge: @escaping () -> Int32?, headers: @escaping () -> [(String, String)]?,
++                enabled: @escaping () -> Bool = { true }, log: @escaping (String) -> Void = { _ in }) {
++        self.guest = guest
++        self.connectBridge = connectBridge
++        self.headers = headers
++        self.enabled = enabled
++        self.log = log
++    }
++
++    /// The answer for a VM with Touch ID off, as the Bridge gives it (it
++    /// cannot sign without the VM's key, and neither can the app): the
++    /// client says "Touch ID off" and the password comes.
++    public static let offAnswer = Answer(status: 403, signature: "",
++                                         body: Data("{\"code\":\"off\",\"error\":\"Touch ID is off for this VM\"}\n".utf8))
++
++    /// Reads the VM's lines until the port's socket closes (or stop()), then
++    /// closes it.
++    public func run() throws {
++        var line = Data(), skipping = false
++        var chunk = [UInt8](repeating: 0, count: 4096)
++        defer {
++            lock.lock(); stopped = true; lock.unlock()
++            drop(nil)
++            writeLock.lock(); closed = true; Darwin.close(guest); writeLock.unlock()
++        }
++        // Lines already waiting were written while nobody relayed: their
++        // clients gave up (no ack), so they never reach the Bridge.
++        let flags = fcntl(guest, F_GETFL)
++        _ = fcntl(guest, F_SETFL, flags | O_NONBLOCK)
++        while chunk.withUnsafeMutableBytes({ Darwin.read(guest, $0.baseAddress, $0.count) }) > 0 {}
++        _ = fcntl(guest, F_SETFL, flags)
++        while true {
++            let count = chunk.withUnsafeMutableBytes { Darwin.read(guest, $0.baseAddress, $0.count) }
++            if count > 0 {
++                var start = 0
++                for index in 0..<count where chunk[index] == 0x0A {
++                    if !skipping {
++                        line.append(contentsOf: chunk[start..<index])
++                        if let l = Self.parse(line) { handle(l) }
++                    }
++                    line.removeAll(keepingCapacity: true)
++                    skipping = false
++                    start = index + 1
++                }
++                if !skipping {
++                    line.append(contentsOf: chunk[start..<count])
++                    if line.count > Self.maximumLineBytes { line.removeAll(); skipping = true }
++                }
++            } else if count == 0 {
++                return
++            } else if errno != EINTR {
++                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno),
++                              userInfo: [NSLocalizedDescriptionKey: "cannot read the guest auth port"])
++            }
++        }
++    }
++
++    /// Ends run() from another thread. Only shuts the socket down: run() may
++    /// be in a read on it, so run() closes it.
++    public func stop() {
++        lock.lock(); stopped = true; lock.unlock()
++        drop(nil)
++        writeLock.lock(); defer { writeLock.unlock() }
++        if !closed { Darwin.shutdown(guest, SHUT_RDWR) }
++    }
++
++    /// Drops the request in flight (`id` nil: any), so the Bridge closes its dialog.
++    private func drop(_ id: String?) {
++        lock.lock(); defer { lock.unlock() }
++        guard let c = current, id == nil || c.id == id else { return }
++        current?.cancelled = true
++        Darwin.shutdown(c.fd, SHUT_RDWR)
++    }
++
++    private func handle(_ l: Line) {
++        switch l {
++        case .ping(let id):
++            lock.lock()
++            if current?.id == id { current?.lastPing = Date() }
++            lock.unlock()
++        case .cancel(let id):
++            drop(id)
++        case .request(let r):
++            let now = Date()
++            if let last = lastRequest, now.timeIntervalSince(last) < minimumGap {
++                return answer(r.id, nil, note: "Touch ID: requests too close together, refused")
++            }
++            lastRequest = now
++            drop(nil)   // one opener at a time: the client of the old one is gone
++            send(Data("{\"ack\":true,\"id\":\"\(r.id)\"}\n".utf8))   // the client knows at once that the app relays (id: 32 hex digits)
++            guard enabled() else {
++                return answer(r.id, Self.offAnswer, note: "Touch ID is off for this VM: refused here, not passed to the Bridge")
++            }
++            // A dropped exchange ends at once; one at a time, so a VM that
++            // floods requests never piles up threads and connections.
++            guard slot.wait(timeout: .now() + handoverTimeout) == .success else {
++                return answer(r.id, nil, note: "Touch ID: the request before is still ending, this one gets the password")
++            }
++            var handed = false
++            defer { if !handed { slot.signal() } }
++            guard let h = headers() else {
++                return answer(r.id, nil, note: "OmacVM Bridge is not set up on this Mac (or is older)")
++            }
++            guard let fd = connectBridge() else { return answer(r.id, nil, note: "OmacVM Bridge does not answer") }
++            lock.lock()
++            if stopped { lock.unlock(); Darwin.close(fd); return }
++            current = (r.id, fd, Date(), false)
++            lock.unlock()
++            handed = true
++            Thread.detachNewThread { [self] in
++                defer { slot.signal() }
++                exchange(r, fd: fd, headers: h)
++            }
++        }
++    }
++
++    private func answer(_ id: String, _ a: Answer?, note: String? = nil) {
++        if let note { log(note) }
++        send(Self.answerLine(id: id, a))
++    }
++
++    /// One line to the VM. Never blocks longer than `writeTimeout`: a VM that
++    /// does not read is dropped (its socket shut down, run() ends).
++    private func send(_ d: Data) {
++        writeLock.lock(); defer { writeLock.unlock() }
++        guard !closed else { return }
++        let deadline = Date().addingTimeInterval(writeTimeout)
++        // SO_SNDTIMEO, not MSG_DONTWAIT: macOS blocks a Unix socket's send
++        // larger than the free buffer even with MSG_DONTWAIT. Only answer()
++        // writes this socket, so the option is ours to set.
++        let sent = d.withUnsafeBytes { b -> Bool in
++            var off = 0
++            while off < b.count {
++                // A zero timeval means "no timeout": never pass one.
++                let left = deadline.timeIntervalSinceNow
++                guard left > 0.001 else { return false }
++                var tv = timeval(tv_sec: Int(left), tv_usec: max(1, Int32((left - left.rounded(.down)) * 1_000_000)))
++                setsockopt(guest, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
++                let n = Darwin.write(guest, b.baseAddress!.advanced(by: off), b.count - off)
++                if n > 0 { off += n; continue }
++                if n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) { continue }
++                return false
++            }
++            return true
++        }
++        if !sent {
++            // libkrun's port is the only one there will be: kept (the client's next line resyncs).
++            log("Touch ID: the VM does not take its answers (one dropped)")
++        }
++    }
++
++    /// The request to the Bridge and its answer; the VM's pings keep it up.
++    private func exchange(_ r: Request, fd: Int32, headers: [(String, String)]) {
++        defer {
++            lock.lock()
++            if current?.fd == fd { current = nil }
++            lock.unlock()
++            Darwin.close(fd)
++        }
++        func gone() -> Bool {
++            lock.lock(); defer { lock.unlock() }
++            guard let c = current, c.fd == fd else { return true }
++            return c.cancelled || Date().timeIntervalSince(c.lastPing) > pingTimeout
++        }
++        var tv = timeval(tv_sec: 5, tv_usec: 0)
++        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
++        let request = Self.httpRequest(r, headers: headers)
++        let wrote = request.withUnsafeBytes { b -> Bool in
++            var off = 0
++            while off < b.count {
++                let n = Darwin.write(fd, b.baseAddress!.advanced(by: off), b.count - off)
++                if n > 0 { off += n } else if n < 0 && errno == EINTR { continue } else { return false }
++            }
++            return true
++        }
++        guard wrote else { return answer(r.id, nil, note: "OmacVM Bridge does not answer") }
++        let deadline = Date().addingTimeInterval(answerTimeout)
++        var data = Data(), chunk = [UInt8](repeating: 0, count: 8192)
++        while data.count <= 65536 {
++            if gone() {
++                log("Touch ID: the VM's client went away, the dialog is closed")
++                return   // nobody to answer
++            }
++            if Date() >= deadline { return answer(r.id, nil, note: "OmacVM Bridge did not answer in time") }
++            var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
++            let ready = poll(&p, 1, 250)
++            if ready < 0 { if errno == EINTR { continue }; break }
++            if ready == 0 { continue }
++            let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
++            if n > 0 {
++                data.append(contentsOf: chunk[0..<n])
++                continue
++            }
++            if n < 0 && errno == EINTR { continue }
++            break   // the Bridge closed: the whole answer is here
++        }
++        if gone() { return }
++        answer(r.id, Self.parseResponse(data))
++    }
++}
++
++/// The HTTP/1.1 the app speaks to OmacVM Bridge on its relay socket (the
++/// control centre's requests and Touch ID's): one request per connection,
++/// and the Bridge answers with Content-Length and closes.
++public enum BridgeHTTP {
++    public static func request(method: String, path: String, headers: [(String, String)], body: Data?) -> Data {
++        var head = "\(method) \(path) HTTP/1.1\r\nHost: omacvm-bridge\r\n"
++        for (k, v) in headers { head += "\(k): \(v)\r\n" }
++        head += "Content-Length: \(body?.count ?? 0)\r\nConnection: close\r\n\r\n"
++        return Data(head.utf8) + (body ?? Data())
++    }
++
++    public struct Response: Equatable {
++        public let status: Int
++        /// Header names in lower case; a repeated name keeps its last value.
++        public let headers: [String: String]
++        public let body: Data
++    }
++
++    /// The Bridge's answer, or nil (none, cut short, not HTTP).
++    public static func parse(_ data: Data) -> Response? {
++        guard let end = data.range(of: Data("\r\n\r\n".utf8)) else { return nil }
++        let lines = String(decoding: data[..<end.lowerBound], as: UTF8.self).components(separatedBy: "\r\n")
++        let first = lines[0].split(separator: " ")
++        guard first.count >= 2, first[0].hasPrefix("HTTP/1."), let status = Int(first[1]), (100...599).contains(status) else { return nil }
++        var body = Data(data[end.upperBound...]), headers: [String: String] = [:]
++        for l in lines.dropFirst() {
++            let kv = l.split(separator: ":", maxSplits: 1)
++            guard kv.count == 2 else { continue }
++            let k = kv[0].lowercased(), v = kv[1].trimmingCharacters(in: .whitespaces)
++            headers[k] = v
++            if k == "content-length" {
++                guard let n = Int(v), n >= 0, body.count >= n else { return nil }   // cut short, or not a length
++                body = body.prefix(n)
++            }
++        }
++        return Response(status: status, headers: headers, body: body)
++    }
++}
++
++// MARK: OmacVM Bridge (NativeControlBridge.relayHeaders, NativeBridgeSocket.connectSecure)
++
++extension AuthRelay {
++    static let bridgeFolder = FileManager.default.homeDirectoryForCurrentUser
++        .appendingPathComponent("Library/Application Support/omacvm-bridge").path
++
++    private static func secret(_ name: String) -> String? {
++        guard let s = try? String(contentsOfFile: bridgeFolder + "/" + name, encoding: .utf8) else { return nil }
++        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
++        return t.count >= 32 ? t : nil
++    }
++
++    /// The app's own headers for a request it passes on: the Bridge token, the relay key and the
++    /// VM's name. Nil: the Bridge is not set up.
++    static func relayHeaders(vmName: String) -> [(String, String)]? {
++        guard let token = secret("token"), let relayKey = secret("relay-key") else { return nil }
++        return [("Authorization", "Bearer " + token), ("X-OmacVM-Relay", relayKey),
++                ("X-OmacVM-App-VM", Data(vmName.utf8).base64EncodedString())]
++    }
++
++    /// The Bridge's relay socket, only inside its own private (0700) folder; nil: not there.
++    static func connectBridge() -> Int32? {
++        let path = bridgeFolder + "/relay.sock"
++        var dir = stat(), sock = stat()
++        guard lstat(bridgeFolder, &dir) == 0, (dir.st_mode & S_IFMT) == S_IFDIR, dir.st_uid == getuid(),
++              (dir.st_mode & 0o077) == 0, lstat(path, &sock) == 0, (sock.st_mode & S_IFMT) == S_IFSOCK,
++              sock.st_uid == getuid() else { return nil }
++        var address = sockaddr_un()
++        let bytes = Array(path.utf8)
++        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { return nil }
++        address.sun_family = sa_family_t(AF_UNIX)
++        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
++        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
++        guard fd >= 0 else { return nil }
++        var one: Int32 = 1
++        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
++        let r = withUnsafePointer(to: &address) {
++            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
++        }
++        guard r == 0 else { Darwin.close(fd); return nil }
++        return fd
++    }
++}
+diff --git a/host/launcher/Sources/steamac-vm/OmacCamera.swift b/host/launcher/Sources/steamac-vm/OmacCamera.swift
+new file mode 100644
+index 0000000..dff5a4e
+--- /dev/null
++++ b/host/launcher/Sources/steamac-vm/OmacCamera.swift
+@@ -0,0 +1,568 @@
++// From OmacVM (github.com/gillesgoetsch/omacvm), MIT, (c) 2026 Gilles Goetsch: app/app/Sources/OmacVM/camera.swift.
++// Changed for libkrun's port (one connection that never ends): CameraChannel never drops it (see there).
++// The Mac's camera for Linux apps in the VM, for OmacVM.app (over a virtio
++// port; app/app/Sources/OmacVM/camera.swift is a link to this file; the
++// Bridge no longer carries it). Tested by ../test-camera.sh.
++// Capture, frame size and wire format from try-omarchy
++// (github.com/omacom/try-omarchy, macos/Sources/OmarchyVMHelper/NativeCameraBridge.swift),
++// MIT, (c) Try Omarchy contributors.
++//
++// One connection per VM (a TCP socket or QEMU's chardev socket), both ways:
++//   VM -> Mac  one JSON object per line: {"type": "start"} or {"type": "stop"}
++//   Mac -> VM  messages: "TOCM", version 1, kind (1 status, 2 frame), 0, 0,
++//              payload length and sequence (UInt32, little-endian), payload.
++//              status: JSON, {"status": "idle" | "streaming" | "unavailable", ...}
++//              frame: 1280x720 NV12, 1,382,400 bytes
++// The camera (and its green light) is on only while a VM said start and has
++// not said stop or gone away; the VM says start only while a Linux app reads
++// its camera. A frame is dropped for a VM that has not taken the last one yet.
++// OMACVM_CAMERA=test: a moving test picture instead of the camera (no
++// permission needed; for checking the way to the VM).
++// The camera is picked again at every start (pickCamera), and a start comes
++// after every loss: the lid closed (the built-in camera is suspended), the
++// camera unplugged, or no picture from it for 5 s. So a VM that still reads
++// gets the next camera there is, or the same one once it is back.
++import AVFoundation
++import CoreMedia
++import CoreVideo
++import Darwin
++import Foundation
++
++enum CameraWire {
++  static let width = 1280, height = 720, fps = 30
++  static let frameBytes = width * height * 3 / 2
++
++  static func message(kind: UInt8, sequence: UInt32, payload: Data) -> Data {
++    var d = Data(capacity: 16 + payload.count)
++    d.append(contentsOf: [0x54, 0x4f, 0x43, 0x4d, 1, kind, 0, 0])   // "TOCM", version, kind, reserved
++    for v in [UInt32(payload.count), sequence] { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
++    d.append(payload)
++    return d
++  }
++
++  static func status(_ fields: [String: Any]) -> Data {
++    let json = (try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])) ?? Data("{}".utf8)
++    return message(kind: 1, sequence: 0, payload: json)
++  }
++}
++
++/// macOS's camera permission for this app: granted, not-determined, denied or restricted.
++func cameraPermission() -> String {
++  switch AVCaptureDevice.authorizationStatus(for: .video) {
++  case .authorized: return "granted"
++  case .notDetermined: return "not-determined"
++  case .denied: return "denied"
++  default: return "restricted"
++  }
++}
++
++/// A camera macOS lists, as pickCamera sees it. usable: connected, and not
++/// suspended (a MacBook's own camera with the lid closed).
++struct CameraChoice: Equatable {
++  let id: String, builtIn: Bool, usable: Bool
++}
++
++/// The camera the VM gets: the built-in one while it can be used, else
++/// macOS's default camera, else the first one that can be used; nil: none.
++func pickCamera(_ cameras: [CameraChoice], systemDefault: String?) -> String? {
++  if let c = cameras.first(where: { $0.builtIn && $0.usable }) { return c.id }
++  if let d = systemDefault, cameras.contains(where: { $0.id == d && $0.usable }) { return d }
++  return cameras.first { $0.usable }?.id
++}
++
++/// Every video camera macOS lists now (built-in, USB and display cameras, Continuity Camera).
++func cameraDevices() -> [AVCaptureDevice] {
++  var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
++  if #available(macOS 14.0, *) { types += [.external, .continuityCamera] } else { types.append(.externalUnknown) }
++  return AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .unspecified).devices
++}
++
++func cameraUsable(_ d: AVCaptureDevice) -> Bool {
++  guard d.isConnected else { return false }
++  if #available(macOS 14.0, *), d.isSuspended { return false }
++  return true
++}
++
++/// The camera the VM gets now (pickCamera).
++func cameraDevice() -> AVCaptureDevice? {
++  let devices = cameraDevices()
++  let choices = devices.map { CameraChoice(id: $0.uniqueID, builtIn: $0.deviceType == .builtInWideAngleCamera, usable: cameraUsable($0)) }
++  guard let id = pickCamera(choices, systemDefault: AVCaptureDevice.default(for: .video)?.uniqueID) else { return nil }
++  return devices.first { $0.uniqueID == id }
++}
++
++struct CameraError: Error {
++  let reason: String, message: String   // reason: permission, no-camera, capture
++}
++
++/// What CameraHub needs of a camera: CameraCapture, or a stand-in in the offline test.
++protocol CameraSource: AnyObject {
++  var test: Bool { get }
++  var onFrame: ((Data) -> Void)? { get set }
++  var onFailure: ((String) -> Void)? { get set }
++  /// A camera was connected (to try again at once while one is missing).
++  var onCameraAdded: (() -> Void)? { get set }
++  func start(_ done: @escaping (Result<String, CameraError>) -> Void)
++  func stop()
++}
++
++/// One capture session (or the test picture). CameraHub starts and stops it.
++/// Each start makes a new session with the camera picked then; stop ends it.
++final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, CameraSource, @unchecked Sendable {
++  private let queue = DispatchQueue(label: "omacvm.camera.session")
++  private let frames = DispatchQueue(label: "omacvm.camera.frames", qos: .userInitiated)
++  private var session: AVCaptureSession?
++  private var observers: [NSObjectProtocol] = []
++  private var suspendWatch: NSKeyValueObservation?
++  private var addedWatch: NSObjectProtocol?
++  private var timer: DispatchSourceTimer?
++  private var reportedBadFrame = false
++  let test = ProcessInfo.processInfo.environment["OMACVM_CAMERA"] == "test"
++  var onFrame: ((Data) -> Void)?
++  var onFailure: ((String) -> Void)?
++  var onCameraAdded: (() -> Void)?
++
++  override init() {
++    super.init()
++    addedWatch = NotificationCenter.default.addObserver(forName: AVCaptureDevice.wasConnectedNotification, object: nil, queue: nil) {
++      [weak self] _ in self?.onCameraAdded?()
++    }
++  }
++
++  /// Starts capturing; done gets the camera's name. Asks for the permission
++  /// first when macOS has not asked yet (its prompt shows now).
++  func start(_ done: @escaping (Result<String, CameraError>) -> Void) {
++    if test {
++      queue.async { self.startTestPicture(); done(.success("test picture")) }
++      return
++    }
++    switch AVCaptureDevice.authorizationStatus(for: .video) {
++    case .authorized:
++      queue.async { self.startSession(done) }
++    case .notDetermined:
++      AVCaptureDevice.requestAccess(for: .video) { granted in
++        if granted { self.queue.async { self.startSession(done) } }
++        else { done(.failure(CameraError(reason: "permission", message: "camera permission not given"))) }
++      }
++    default:
++      done(.failure(CameraError(reason: "permission", message: "camera permission denied (System Settings > Privacy & Security > Camera)")))
++    }
++  }
++
++  /// Ends the session: the next start picks the camera again (the lid may
++  /// have closed, a camera gone or come since).
++  func stop() {
++    queue.async { self.endSession() }
++  }
++
++  private func endSession() {   // on queue
++    timer?.cancel(); timer = nil
++    session?.stopRunning()
++    session = nil
++    observers.forEach { NotificationCenter.default.removeObserver($0) }
++    observers = []
++    suspendWatch?.invalidate(); suspendWatch = nil
++  }
++
++  private func startSession(_ done: (Result<String, CameraError>) -> Void) {
++    do {
++      endSession()
++      let s = try makeSession()
++      session = s
++      s.startRunning()
++      guard s.isRunning else { throw CameraError(reason: "capture", message: "the camera did not start") }
++      reportedBadFrame = false
++      done(.success((s.inputs.first as? AVCaptureDeviceInput)?.device.localizedName ?? "camera"))
++    } catch let e as CameraError {
++      done(.failure(e))
++    } catch {
++      done(.failure(CameraError(reason: "capture", message: "\(error.localizedDescription)")))
++    }
++  }
++
++  private func makeSession() throws -> AVCaptureSession {
++    guard let device = cameraDevice() else { throw CameraError(reason: "no-camera", message: "this Mac has no camera") }
++    let input = try AVCaptureDeviceInput(device: device)
++    let output = AVCaptureVideoDataOutput()
++    output.alwaysDiscardsLateVideoFrames = true
++    // AVFoundation scales to this size when the camera has no 720p mode.
++    output.videoSettings = [
++      kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
++      kCVPixelBufferWidthKey as String: CameraWire.width,
++      kCVPixelBufferHeightKey as String: CameraWire.height,
++    ]
++    output.setSampleBufferDelegate(self, queue: frames)
++    let s = AVCaptureSession()
++    s.beginConfiguration()
++    defer { s.commitConfiguration() }
++    // The default preset gives 1080p on FaceTime HD cameras even in a 720p format.
++    if s.canSetSessionPreset(.hd1280x720) { s.sessionPreset = .hd1280x720 }
++    guard s.canAddInput(input), s.canAddOutput(output) else {
++      throw CameraError(reason: "capture", message: "the camera cannot be used (another app holds it?)")
++    }
++    s.addInput(input)
++    s.addOutput(output)
++    // 1280x720 at 30 fps when the camera has it, set inside the configuration.
++    let format = device.formats.first { f in
++      let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
++      return d.width == CameraWire.width && d.height == CameraWire.height
++        && f.videoSupportedFrameRateRanges.contains { $0.minFrameRate <= Double(CameraWire.fps) && $0.maxFrameRate >= Double(CameraWire.fps) }
++    }
++    if let format, (try? device.lockForConfiguration()) != nil {
++      device.activeFormat = format
++      let t = CMTime(value: 1, timescale: CMTimeScale(CameraWire.fps))
++      device.activeVideoMinFrameDuration = t
++      device.activeVideoMaxFrameDuration = t
++      device.unlockForConfiguration()
++    }
++    for name in [AVCaptureSession.runtimeErrorNotification, AVCaptureSession.wasInterruptedNotification] {
++      observers.append(NotificationCenter.default.addObserver(forName: name, object: s, queue: nil) { [weak self] n in
++        self?.onFailure?(n.name == AVCaptureSession.runtimeErrorNotification ? "the camera reported an error" : "the camera was taken away")
++      })
++    }
++    // Unplugged, or (a MacBook's own camera) the lid closed.
++    let name = device.localizedName
++    observers.append(NotificationCenter.default.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: device, queue: nil) {
++      [weak self] _ in self?.onFailure?("\(name) is gone")
++    })
++    if #available(macOS 14.0, *) {
++      suspendWatch = device.observe(\.isSuspended, options: [.new]) { [weak self] d, _ in
++        if d.isSuspended { self?.onFailure?("\(name) is suspended (the lid closed?)") }
++      }
++    }
++    return s
++  }
++
++  func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
++    guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
++    if let payload = nv12(pb) { onFrame?(payload) }
++    else if !reportedBadFrame {
++      reportedBadFrame = true
++      onFailure?(String(format: "the camera gives %dx%d frames in format 0x%08x, not 1280x720 NV12",
++                        CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb), CVPixelBufferGetPixelFormatType(pb)))
++    }
++  }
++
++  /// The frame as packed NV12: the luma rows, then the interleaved chroma rows.
++  private func nv12(_ pb: CVPixelBuffer) -> Data? {
++    guard CVPixelBufferGetPixelFormatType(pb) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
++          CVPixelBufferGetWidth(pb) == CameraWire.width, CVPixelBufferGetHeight(pb) == CameraWire.height,
++          CVPixelBufferGetPlaneCount(pb) == 2 else { return nil }
++    CVPixelBufferLockBaseAddress(pb, .readOnly)
++    defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
++    var payload = Data(count: CameraWire.frameBytes)
++    let ok = payload.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Bool in
++      guard let base = dst.baseAddress else { return false }
++      var off = 0
++      for plane in 0..<2 {
++        // Both planes hold `width` bytes per row (the chroma plane: width/2 pairs).
++        let rows = CVPixelBufferGetHeightOfPlane(pb, plane), stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane)
++        guard let src = CVPixelBufferGetBaseAddressOfPlane(pb, plane),
++              rows == (plane == 0 ? CameraWire.height : CameraWire.height / 2), stride >= CameraWire.width,
++              off + rows * CameraWire.width <= dst.count else { return false }
++        for r in 0..<rows {
++          memcpy(base + off, src + r * stride, CameraWire.width)
++          off += CameraWire.width
++        }
++      }
++      return off == dst.count
++    }
++    return ok ? payload : nil
++  }
++
++  /// Bands that move down the picture, 30 times a second.
++  private func startTestPicture() {
++    timer?.cancel()
++    var tick = 0
++    let t = DispatchSource.makeTimerSource(queue: frames)
++    t.schedule(deadline: .now(), repeating: 1.0 / Double(CameraWire.fps))
++    t.setEventHandler { [weak self] in
++      tick += 1
++      var p = Data(count: CameraWire.frameBytes)
++      p.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) in
++        guard let base = b.baseAddress else { return }
++        for r in 0..<CameraWire.height {
++          memset(base + r * CameraWire.width, Int32(16 + ((r / 4 + tick * 4) % 220)), CameraWire.width)
++        }
++        memset(base + CameraWire.width * CameraWire.height, 128, CameraWire.width * CameraWire.height / 2)
++      }
++      self?.onFrame?(p)
++    }
++    t.resume()
++    timer = t
++  }
++}
++
++/// One VM's connection: writes go through its own queue, so a slow VM never
++/// holds up the camera or another VM.
++final class CameraChannel: @unchecked Sendable {
++  let fd: Int32, label: String
++  private let out = DispatchQueue(label: "omacvm.camera.out")
++  private let lock = NSLock()
++  private var pending = false, closed = false
++
++  init(fd: Int32, label: String) {
++    self.fd = fd; self.label = label
++    var one: Int32 = 1
++    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
++    // libkrun's port is the only connection there will be (no reconnect as with QEMU's socket):
++    // a guest that stops reading only holds up this queue (frames are dropped meanwhile), and
++    // the agent's next run skips to the next whole message (its reader resyncs on "TOCM").
++  }
++
++  /// Queues a message; a frame is dropped while the last one is still going out.
++  func send(_ data: Data, frame: Bool = false) {
++    lock.lock()
++    if closed || (frame && pending) { lock.unlock(); return }
++    if frame { pending = true }
++    lock.unlock()
++    out.async { [self] in
++      let ok = data.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Bool in
++        var off = 0
++        while off < b.count {
++          let n = Darwin.write(fd, b.baseAddress! + off, b.count - off)
++          if n > 0 { off += n } else if n < 0 && errno == EINTR { continue } else { return false }
++        }
++        return true
++      }
++      lock.lock()
++      if frame { pending = false }
++      lock.unlock()
++      if !ok { shutdown() }   // only a broken socket
++    }
++  }
++
++  /// Ends the connection; the reading loop then sees its end.
++  func shutdown() {
++    lock.lock(); let was = closed; closed = true; lock.unlock()
++    if !was { Darwin.shutdown(fd, SHUT_RDWR) }
++  }
++}
++
++/// Every VM connection that may ask for the camera; the camera runs while at
++/// least one of them wants it.
++final class CameraHub: @unchecked Sendable {
++  private let lock = NSLock()
++  private var channels: [ObjectIdentifier: CameraChannel] = [:]
++  private var wanting = Set<ObjectIdentifier>()
++  private var state = "idle"   // idle, starting, streaming
++  private var cameraName = ""
++  private var sequence: UInt32 = 0
++  private var retryDelay: Double   // seconds; doubles up to 30, back to the first with the first frame
++  private let firstRetry: Double
++  private var problem = ""         // the last failure, logged once
++  private let capture: CameraSource
++  private let log: (String) -> Void
++  // Streaming with no frame for this long (a camera that stopped without a
++  // word): picked and started again. The first frame of a start may take
++  // longer (Continuity Camera over the air). Seconds of uptime: a sleep or a
++  // clock change does not count.
++  private let frameTimeout: Double
++  private let firstFrameTimeout: Double
++  private var lastFrame = 0.0
++  private var framed = false   // a frame since this start
++  private var watchdog: DispatchSourceTimer?
++  let maxConnections = 8
++
++  init(log: @escaping (String) -> Void, source: CameraSource = CameraCapture(), firstRetry: Double = 2, frameTimeout: Double = 5,
++       firstFrameTimeout: Double = 20) {
++    self.log = log
++    self.capture = source
++    self.firstRetry = firstRetry
++    self.retryDelay = firstRetry
++    self.frameTimeout = frameTimeout
++    self.firstFrameTimeout = firstFrameTimeout
++    capture.onFrame = { [weak self] in self?.frame($0) }
++    capture.onFailure = { [weak self] in self?.failed($0) }
++    capture.onCameraAdded = { [weak self] in self?.retryNow() }
++  }
++
++  var canAttach: Bool { lock.lock(); defer { lock.unlock() }; return channels.count < maxConnections }
++
++  /// GET /camera/status: permission, camera, how many VMs read it now.
++  func status() -> [String: Any] {
++    lock.lock(); let on = state == "streaming", readers = wanting.count, n = channels.count; lock.unlock()
++    return ["permission": capture.test ? "test" : cameraPermission(), "camera": capture.test ? "test picture" : (cameraDevice()?.localizedName as Any? ?? NSNull()),
++            "on": on, "readers": readers, "connections": n]
++  }
++
++  var summary: String {
++    lock.lock(); defer { lock.unlock() }
++    return state == "streaming" ? "on for \(wanting.count) VM\(wanting.count == 1 ? "" : "s")" : "off"
++  }
++
++  /// Serves one connection on its own thread; leftover = bytes already read past the request.
++  func attach(fd: Int32, label: String, leftover: Data = Data()) {
++    Thread.detachNewThread { self.run(fd: fd, label: label, leftover: leftover) }
++  }
++
++  /// Serves one connection until it ends, then closes it.
++  func run(fd: Int32, label: String, leftover: Data = Data()) {
++    let c = CameraChannel(fd: fd, label: label), id = ObjectIdentifier(c)
++    lock.lock(); channels[id] = c; lock.unlock()
++    c.send(CameraWire.status(["status": "idle"]))
++    var line = Data(), buf = [UInt8](repeating: 0, count: 1024)
++    func feed(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
++      for byte in bytes {
++        if byte == 0x0A {
++          guard let o = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
++                let type = o["type"] as? String, type == "start" || type == "stop" else {
++            log("\(label): not a camera request, closing"); return false
++          }
++          want(c, type == "start")
++          line.removeAll(keepingCapacity: true)
++        } else if byte != 0x0D {
++          guard line.count < 4096 else { return false }
++          line.append(byte)
++        }
++      }
++      return true
++    }
++    var going = leftover.withUnsafeBytes { feed($0.bindMemory(to: UInt8.self)) }
++    while going {
++      let n = Darwin.read(fd, &buf, buf.count)
++      if n > 0 { going = buf.withUnsafeBufferPointer { feed(UnsafeBufferPointer(rebasing: $0[0..<n])) } }
++      else if n < 0 && errno == EINTR { continue }
++      else { going = false }
++    }
++    lock.lock()
++    channels[id] = nil
++    let wanted = wanting.remove(id) != nil, none = wanting.isEmpty
++    lock.unlock()
++    c.shutdown()
++    Darwin.close(fd)
++    if wanted && none { stopCapture() }
++  }
++
++  private func want(_ c: CameraChannel, _ on: Bool) {
++    let id = ObjectIdentifier(c)
++    lock.lock()
++    let changed = on ? wanting.insert(id).inserted : wanting.remove(id) != nil
++    let st = state, none = wanting.isEmpty, name = cameraName
++    if changed && on && st == "idle" { state = "starting" }
++    lock.unlock()
++    guard changed else { return }
++    if on {
++      if st == "streaming" { c.send(streaming(name)) }
++      else if st == "idle" { log("\(c.label) wants the camera"); startCapture() }   // starting: the status comes when it is up
++    } else {
++      c.send(CameraWire.status(["status": "idle"]))
++      if none { stopCapture() }
++    }
++  }
++
++  private func streaming(_ name: String) -> Data {
++    CameraWire.status(["status": "streaming", "name": name, "width": CameraWire.width, "height": CameraWire.height,
++                       "fps": CameraWire.fps, "pixelFormat": "NV12"])
++  }
++
++  private func startCapture() {   // state is "starting"
++    capture.start { [self] result in
++      lock.lock()
++      if wanting.isEmpty {   // nobody left by the time it started
++        state = "idle"; lock.unlock()
++        capture.stop()
++        return
++      }
++      let targets = wanting.compactMap { channels[$0] }
++      switch result {
++      case .success(let name):
++        state = "streaming"; cameraName = name
++        lastFrame = ProcessInfo.processInfo.systemUptime; framed = false
++        let retrying = !problem.isEmpty   // "back" comes with the first frame
++        lock.unlock()
++        watch()
++        if !retrying { log("on (\(name))") }
++        targets.forEach { $0.send(streaming(name)) }
++      case .failure(let e):
++        state = "idle"
++        let new = problem != e.message; problem = e.message
++        retryLater()
++        lock.unlock()
++        if new { log("unavailable: \(e.message) (trying again while a VM wants it)") }
++        targets.forEach { $0.send(CameraWire.status(["status": "unavailable", "reason": e.reason])) }
++      }
++    }
++  }
++
++  private func stopCapture() {
++    lock.lock(); let was = state; state = "idle"; retryDelay = firstRetry; problem = ""; lock.unlock()
++    guard was != "idle" else { return }
++    capture.stop()
++    log("off (no VM reads it)")
++  }
++
++  private func failed(_ message: String) {
++    lock.lock()
++    let was = state
++    guard was == "streaming" else { lock.unlock(); return }
++    state = "idle"
++    let targets = wanting.compactMap { channels[$0] }
++    let new = problem != message; problem = message
++    retryLater()
++    lock.unlock()
++    capture.stop()
++    if new { log("stopped: \(message) (trying again while a VM wants it)") }
++    targets.forEach { $0.send(CameraWire.status(["status": "unavailable", "reason": "capture"])) }
++  }
++
++  /// Streaming: once a second, whether frames still come.
++  private func watch() {
++    let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
++    let every = min(1.0, frameTimeout / 3)
++    t.schedule(deadline: .now() + every, repeating: every)
++    t.setEventHandler { [weak self, weak t] in
++      guard let self else { t?.cancel(); return }
++      self.lock.lock()
++      let streaming = self.state == "streaming", quiet = ProcessInfo.processInfo.systemUptime - self.lastFrame
++      let limit = self.framed ? self.frameTimeout : self.firstFrameTimeout, name = self.cameraName
++      self.lock.unlock()
++      if !streaming { t?.cancel(); return }
++      if quiet > limit { self.failed("no picture from \(name) for \(Int(limit.rounded())) s") }
++    }
++    lock.lock(); watchdog?.cancel(); watchdog = t; lock.unlock()
++    t.resume()
++  }
++
++  /// A camera was connected: while VMs want one and none runs, try at once.
++  private func retryNow() {
++    lock.lock()
++    let go = state == "idle" && !wanting.isEmpty
++    if go { state = "starting"; retryDelay = firstRetry }
++    lock.unlock()
++    if go { log("a camera was connected: trying again"); startCapture() }
++  }
++
++  /// The camera failed while VMs still want it (another app took it, the
++  /// permission is not given yet, the lid closed, it was unplugged): tries
++  /// again after 2 s, then up to every 30 s, with the camera picked then,
++  /// until it works or no VM wants it. The VMs show black meanwhile and get
++  /// "streaming" when it is back. Lock held.
++  private func retryLater() {
++    let delay = retryDelay
++    retryDelay = min(retryDelay * 2, 30)
++    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [self] in
++      lock.lock()
++      let go = state == "idle" && !wanting.isEmpty
++      if go { state = "starting" }
++      lock.unlock()
++      if go { startCapture() }
++    }
++  }
++
++  private func frame(_ payload: Data) {
++    lock.lock()
++    guard state == "streaming" else { lock.unlock(); return }
++    lastFrame = ProcessInfo.processInfo.systemUptime; framed = true
++    if retryDelay != firstRetry || !problem.isEmpty {   // it works again
++      if !problem.isEmpty { log("back: \(cameraName)") }
++      retryDelay = firstRetry; problem = ""
++    }
++    sequence &+= 1
++    let seq = sequence, targets = wanting.compactMap { channels[$0] }
++    lock.unlock()
++    guard !targets.isEmpty else { return }
++    let m = CameraWire.message(kind: 2, sequence: seq, payload: payload)
++    targets.forEach { $0.send(m, frame: true) }
++  }
++}
+diff --git a/host/launcher/Sources/steamac-vm/OmacHostBattery.swift b/host/launcher/Sources/steamac-vm/OmacHostBattery.swift
+new file mode 100644
+index 0000000..707ece3
+--- /dev/null
++++ b/host/launcher/Sources/steamac-vm/OmacHostBattery.swift
+@@ -0,0 +1,196 @@
++// From OmacVM (github.com/gillesgoetsch/omacvm), MIT, (c) 2026 Gilles Goetsch: app/app/Sources/OmacVM/HostBattery.swift, unchanged.
++// The Mac's battery for the VM: one snapshot of its power sources, as JSON.
++// (The Bridge's copy went with the retired routes in 3.4.0.)
++//
++// From try-omarchy (github.com/omacom/try-omarchy), MIT, (c) Try Omarchy
++// contributors: macos/Sources/OmarchyVMHelper/NativeBatteryBridge.swift
++// (HostBatterySnapshot), HostBatteryDetails.swift, HostChargeLimit.swift.
++import Foundation
++import IOKit
++import IOKit.ps
++
++/// One complete snapshot of the Mac's power sources.
++struct HostBatterySnapshot: Equatable {
++    let present: Bool
++    let percentage: Int?
++    let state: String
++    let acConnected: Bool
++    let timeToEmptySeconds: Int?
++    let timeToFullSeconds: Int?
++    let chargeLimit: Int?
++    let details: HostBatteryDetails
++
++    init(descriptions: [[String: Any]], chargeLimit: Int? = nil, details: HostBatteryDetails = HostBatteryDetails()) {
++        let internalBattery = descriptions.first {
++            $0[kIOPSTypeKey] as? String == kIOPSInternalBatteryType && $0[kIOPSIsPresentKey] as? Bool != false
++        }
++        guard let battery = internalBattery else {
++            present = false; percentage = nil; state = "unknown"; acConnected = true
++            timeToEmptySeconds = nil; timeToFullSeconds = nil; self.chargeLimit = nil; self.details = HostBatteryDetails()
++            return
++        }
++        present = true
++        self.details = details
++        self.chargeLimit = chargeLimit.flatMap { (1..<100).contains($0) ? $0 : nil }
++        let current = battery[kIOPSCurrentCapacityKey] as? Int ?? 0
++        let maximum = battery[kIOPSMaxCapacityKey] as? Int ?? 100
++        percentage = maximum > 0 ? min(100, max(0, current * 100 / maximum)) : 0
++        let onMains = battery[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
++        acConnected = onMains
++        if battery[kIOPSIsChargingKey] as? Bool == true { state = "charging" }
++        else if battery[kIOPSIsChargedKey] as? Bool == true { state = "full" }
++        else if onMains { state = "not-charging" }
++        else { state = "discharging" }
++        func seconds(_ key: String) -> Int? {
++            guard let minutes = battery[key] as? Int, minutes >= 0 else { return nil }
++            return minutes * 60
++        }
++        timeToEmptySeconds = state == "discharging" ? seconds(kIOPSTimeToEmptyKey) : nil
++        timeToFullSeconds = state == "charging" ? seconds(kIOPSTimeToFullChargeKey) : nil
++    }
++
++    /// One line for the virtio port.
++    var line: Data {
++        var data = (try? JSONSerialization.data(withJSONObject: dictionary, options: [.sortedKeys])) ?? Data("{}".utf8)
++        data.append(0x0A)
++        return data
++    }
++
++    var dictionary: [String: Any] {
++        [
++            "type": "state",
++            "present": present,
++            "percentage": percentage as Any? ?? NSNull(),
++            "state": state,
++            "acConnected": acConnected,
++            "timeToEmptySeconds": timeToEmptySeconds as Any? ?? NSNull(),
++            "timeToFullSeconds": timeToFullSeconds as Any? ?? NSNull(),
++            "chargeLimit": chargeLimit as Any? ?? NSNull(),
++            "chargeNowMicroAh": details.chargeNowMicroAh as Any? ?? NSNull(),
++            "chargeFullMicroAh": details.chargeFullMicroAh as Any? ?? NSNull(),
++            "chargeFullDesignMicroAh": details.chargeFullDesignMicroAh as Any? ?? NSNull(),
++            "voltageMicroV": details.voltageMicroV as Any? ?? NSNull(),
++            "cycleCount": details.cycleCount as Any? ?? NSNull(),
++            "currentMicroA": details.currentMicroA as Any? ?? NSNull(),
++            "powerMicroW": details.powerMicroW as Any? ?? NSNull(),
++        ]
++    }
++
++    static func capture() -> HostBatterySnapshot {
++        guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
++                    let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else {
++            return HostBatterySnapshot(descriptions: [])
++        }
++        let descriptions = list.compactMap {
++            IOPSGetPowerSourceDescription(blob, $0)?.takeUnretainedValue() as? [String: Any]
++        }
++        return HostBatterySnapshot(descriptions: descriptions, chargeLimit: HostChargeLimit.capture(),
++                                                              details: HostBatteryDetails.capture())
++    }
++}
++
++/// The battery's own readings (AppleSmartBattery), apart from the 0-100
++/// capacities above: charge in µAh, voltage in µV, current in µA and power
++/// in µW, as Linux wants them. Current is signed: below 0 while the battery
++/// gives power (discharging), as AppleSmartBattery's "Amperage" (mA).
++struct HostBatteryDetails: Equatable {
++    let chargeNowMicroAh: Int?
++    let chargeFullMicroAh: Int?
++    let chargeFullDesignMicroAh: Int?
++    let voltageMicroV: Int?
++    let cycleCount: Int?
++    let currentMicroA: Int?
++    let powerMicroW: Int?
++
++    init(properties: [String: Any] = [:]) {
++        let data = properties["BatteryData"] as? [String: Any] ?? [:]
++        func reading(_ candidates: [Any?], multiplier: Int = 1, minimum: Int = 0) -> Int? {
++            for candidate in candidates {
++                guard let number = candidate as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
++                            let value = candidate as? Int, value >= minimum, value <= Int(Int32.max) / multiplier else { continue }
++                return value * multiplier
++            }
++            return nil
++        }
++        chargeNowMicroAh = reading([properties["AppleRawCurrentCapacity"], data["RemainingCapacity"]], multiplier: 1000)
++        chargeFullMicroAh = reading([properties["AppleRawMaxCapacity"], data["FullChargeCapacity"]], multiplier: 1000, minimum: 1)
++        chargeFullDesignMicroAh = reading([properties["DesignCapacity"], data["DesignCapacity"]], multiplier: 1000, minimum: 1)
++        voltageMicroV = reading([properties["Voltage"]], multiplier: 1000, minimum: 1)
++        cycleCount = reading([properties["CycleCount"]])
++        // Amperage is averaged by the battery (InstantAmperage is not): steadier
++        // watts and time left. Power is current x voltage of the same reading,
++        // so the watts and UPower's time left (charge / current) agree.
++        let milliAmps = [properties["Amperage"], properties["InstantAmperage"]].lazy
++            .compactMap(HostBatteryDetails.signedMilliamps).first
++        currentMicroA = milliAmps.map { $0 * 1000 }
++        if let milliAmps, let millivolts = voltageMicroV.map({ $0 / 1000 }) {
++            let microWatts = abs(milliAmps) * millivolts   // mA x mV = µW
++            powerMicroW = microWatts <= Int(Int32.max) ? microWatts : nil
++        } else {
++            powerMicroW = nil
++        }
++    }
++
++    /// A signed current in mA from IOKit, or nil. IOKit keeps it as a signed
++    /// 32-bit number; ioreg prints it as unsigned 64-bit (-573 shows as
++    /// 18446744073709551043), so a wrapped 64- or 32-bit value is read back as
++    /// signed too. More than ±2147 A (beyond Int32 in µA) is not a reading.
++    static func signedMilliamps(_ candidate: Any?) -> Int? {
++        guard let number = candidate as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
++        var value = number.int64Value              // UInt64 above Int64.max: its bit pattern
++        if value > Int64(Int32.max) && value <= Int64(UInt32.max) {
++            value = Int64(Int32(truncatingIfNeeded: value))
++        }
++        let limit = Int64(Int32.max / 1000)
++        guard value >= -limit && value <= limit else { return nil }
++        return Int(value)
++    }
++
++    static func capture() -> HostBatteryDetails {
++        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
++        guard service != 0 else { return HostBatteryDetails() }
++        defer { IOObjectRelease(service) }
++        var unmanaged: Unmanaged<CFMutableDictionary>?
++        guard IORegistryEntryCreateCFProperties(service, &unmanaged, kCFAllocatorDefault, 0) == KERN_SUCCESS,
++                    let properties = unmanaged?.takeRetainedValue() as? [String: Any],
++                    properties["BatteryInstalled"] as? Bool != false else { return HostBatteryDetails() }
++        return HostBatteryDetails(properties: properties)
++    }
++}
++
++/// The charge limit set in macOS (System Settings › Battery), read from
++/// powerd's file. Undocumented: missing or changed means no limit.
++enum HostChargeLimit {
++    static let policyURL = URL(fileURLWithPath: "/Library/Preferences/com.apple.powerd.charging.plist")
++
++    static func capture() -> Int? {
++        guard let data = try? Data(contentsOf: policyURL),
++                    let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
++                    let archive = plist["policies"] as? Data,
++                    let decoder = try? NSKeyedUnarchiver(forReadingFrom: archive) else { return nil }
++        decoder.decodingFailurePolicy = .setErrorAndReturn
++        decoder.setClass(HostChargingPolicy.self, forClassName: "ChargeCtrlPolicy")
++        defer { decoder.finishDecoding() }
++        guard let policies = decoder.decodeObject(of: [NSArray.self, HostChargingPolicy.self, NSString.self],
++                                                                                            forKey: NSKeyedArchiveRootObjectKey) as? [HostChargingPolicy],
++                    decoder.error == nil else { return nil }
++        return policies.filter { $0.reason == "manualChargeLimit" && !$0.terminated && (1..<100).contains($0.limit) }
++            .map(\.limit).min()
++    }
++}
++
++@objc(OmacVMHostChargingPolicy)
++private final class HostChargingPolicy: NSObject, NSSecureCoding {
++    static var supportsSecureCoding: Bool { true }
++    let reason: String?
++    let limit: Int
++    let terminated: Bool
++
++    required init?(coder: NSCoder) {
++        reason = coder.decodeObject(of: NSString.self, forKey: "reason") as String?
++        limit = coder.decodeInteger(forKey: "soclimit")
++        terminated = coder.decodeBool(forKey: "terminated")
++    }
++
++    func encode(with coder: NSCoder) { preconditionFailure("read-only") }
++}
+diff --git a/host/launcher/Sources/steamac-vm/OmacMediaClaim.swift b/host/launcher/Sources/steamac-vm/OmacMediaClaim.swift
+new file mode 100644
+index 0000000..61034d5
+--- /dev/null
++++ b/host/launcher/Sources/steamac-vm/OmacMediaClaim.swift
+@@ -0,0 +1,340 @@
++// From OmacVM (github.com/gillesgoetsch/omacvm), MIT, (c) 2026 Gilles Goetsch:
++// app/app/Sources/OmacVMMedia/MediaClaim.swift, unchanged. The org.omacvm.* guest agents expect exactly this protocol.
++import Foundation
++
++/// The commands macOS gives the Now Playing app (MPRemoteCommandCenter) that
++/// OmacVM takes. Skip and seek stay off, so a double or triple press on
++/// AirPods stays next and previous.
++public enum RemoteCommand: String, CaseIterable, Sendable {
++    case play, pause, togglePlayPause, stop, nextTrack, previousTrack
++}
++
++/// When the launcher is the Mac's Now Playing app for the VM (docs/adr/0058).
++/// Events in, what to send and log out; `shown` is what Now Playing should
++/// say (nil: given up), `deadline` when `tick` is due next. No clock of its
++/// own: every event brings `now` (seconds, any monotonic clock). Only the
++/// main thread uses it (MediaSession).
++///
++/// macOS gives the controls to the last process that went into playing; a
++/// paused one keeps them; removing the targets gives them up (the spike,
++/// tracks/airpods-media.md). So:
++/// - claim when the switch is on, the agent said hello and its player plays;
++/// - paused: keep the claim (the next press resumes the VM), shown paused;
++/// - a non-playing state shorter than 1.5 s (a track change, buffering)
++///   leaves Now Playing as it is; playing again after a pause, or a new
++///   claim after giving up, takes Now Playing from a Mac app at most once
++///   per 10 s from the VM's side (the app's switch going on does not wait);
++/// - give up when nothing plays for 3 s, after 30 min paused, with no word
++///   from the agent for 45 s (the Mac's sleep does not count), when the
++///   switch goes off or QEMU ends;
++/// - an agent that starts again (apply) says hello: the claim stays if its
++///   first state comes within 8 s and has a player (gi, D-Bus and a busy VM
++///   take their time).
++public struct MediaClaim {
++    public enum Effect: Equatable { case send(Data), log(String) }
++    public enum Answer: Equatable { case send(MacCommand), notClaimed, noLink }
++
++    /// What Now Playing says while claimed.
++    public struct Shown: Equatable, Sendable {
++        public var title: String
++        public var artist: String
++        public var album: String
++        public var duration: Double?
++        public var elapsed: Double?
++        public var playing: Bool
++        public var rate: Double
++        public var canNext: Bool
++        public var canPrevious: Bool
++
++        public init(title: String, artist: String, album: String, duration: Double?, elapsed: Double?, playing: Bool,
++                    rate: Double, canNext: Bool, canPrevious: Bool) {
++            self.title = title; self.artist = artist; self.album = album; self.duration = duration
++            self.elapsed = elapsed; self.playing = playing; self.rate = rate
++            self.canNext = canNext; self.canPrevious = canPrevious
++        }
++
++        /// Whether Now Playing's info must be set again, `seconds` after it
++        /// was set to `old`: anything but the elapsed time changed, or that
++        /// moved more than 2 s from where the old rate had it.
++        public func needsInfo(after old: Shown?, seconds: Double) -> Bool {
++            guard let old else { return true }
++            var a = self, b = old
++            a.elapsed = nil; b.elapsed = nil
++            if a != b { return true }
++            switch (elapsed, old.elapsed) {
++            case (nil, nil): return false
++            case let (e?, o?): return abs(e - (o + old.rate * seconds)) > 2
++            default: return true
++            }
++        }
++    }
++
++    /// Whether Now Playing's info must be set again. macOS moves the elapsed
++    /// time on by itself from the info last set, so a new `Shown` is compared
++    /// with that one and the time since it was set, not with the last shown.
++    public struct InfoGate {
++        private var set: Shown?
++        private var at = 0.0
++
++        public init() {}
++
++        /// Whether `s` must be set at `now`; when it must, it counts as set.
++        public mutating func needsSet(_ s: Shown, now: Double) -> Bool {
++            guard s.needsInfo(after: set, seconds: now - at) else { return false }
++            set = s
++            at = now
++            return true
++        }
++
++        /// The info was cleared (Now Playing given up).
++        public mutating func cleared() { set = nil }
++    }
++
++    public static let settle = 1.5
++    public static let stopRelease = 3.0
++    public static let helloGrace = 8.0
++    public static let retakeEvery = 10.0
++    public static let lease = 45.0
++    public static let pausedRelease = 1800.0
++    /// After the Mac's play or pause, the agent's next states have this long to agree.
++    public static let commandHold = 1.5
++
++    public private(set) var on: Bool
++    public private(set) var claimed = false
++    public private(set) var shownPlaying = false
++    /// The agent's last state, and the last one with a player (Now Playing's text).
++    public private(set) var last: GuestState?
++    private var info: GuestState?
++    private var linked = false
++    private var helloSeen = false
++    private var invited = false
++    private var guestID: String?
++    private var agentLogged = -Double.infinity
++    private var lastLine: Double?
++    private var notPlayingSince: Double?
++    private var stoppedSince: Double?
++    private var pausedSince: Double?
++    private var lastTake = -Double.infinity
++    /// A playing state that waits for its claim (10 s since the last take).
++    private var waiting = false
++    private var graceUntil: Double?
++    private var held: (playing: Bool, until: Double)?
++    private var asleep = false
++
++    public init(on: Bool) { self.on = on }
++
++    public var shown: Shown? {
++        guard claimed, let s = info ?? last else { return nil }
++        return Shown(title: s.title.isEmpty ? s.player : s.title, artist: s.artist, album: s.album,
++                     duration: s.length, elapsed: s.position, playing: shownPlaying,
++                     rate: shownPlaying ? s.rate : 0, canNext: s.canNext, canPrevious: s.canPrevious)
++    }
++
++    /// When `tick` is due next (nil: nothing waits).
++    public var deadline: Double? {
++        guard claimed else { return waiting ? lastTake + Self.retakeEvery : nil }
++        var d: [Double] = []
++        // While held, what Now Playing shows waits for the hold's end (a retake
++        // due earlier would wake the timer every 50 ms until then).
++        if let h = held {
++            d.append(h.until)
++        } else {
++            if last?.status == .playing, !shownPlaying { d.append(lastTake + Self.retakeEvery) }
++            if shownPlaying, last?.status != .playing, let n = notPlayingSince { d.append(n + Self.settle) }
++        }
++        if let s = stoppedSince { d.append(s + Self.stopRelease) }
++        if let p = pausedSince { d.append(p + Self.pausedRelease) }
++        if let g = graceUntil { d.append(g) }
++        if !asleep, let l = lastLine { d.append(l + Self.lease) }
++        return d.min()
++    }
++
++    /// A new connection to the port (QEMU's socket): the agent must say hello on it.
++    public mutating func connected() {
++        linked = true
++        helloSeen = false
++        invited = false
++    }
++
++    /// The connection ended. The claim stays: QEMU ending is `stop`, anything
++    /// else reconnects within a second, and the lease covers an agent that
++    /// never comes back.
++    public mutating func disconnected() {
++        linked = false
++        helloSeen = false
++        waiting = false
++    }
++
++    public mutating func received(_ m: GuestMessage, now: Double) -> [Effect] {
++        switch m {
++        case .hello(let v, let id):
++            var fx: [Effect] = [.send(MediaLine.hello(on: on, id: id))]
++            if id != guestID {
++                // An agent that fails and starts again every few seconds (its
++                // unit restarts it) is said at most once a minute.
++                if now - agentLogged >= 60 {
++                    fx.append(.log("the VM's agent is there (v\(v))"))
++                    agentLogged = now
++                }
++                // An agent that started again (apply, a crash) while claimed.
++                if claimed { graceUntil = now + Self.helloGrace }
++            }
++            helloSeen = true
++            guestID = id
++            lastLine = now
++            return fx + settle(now)
++        case .state(let s):
++            guard helloSeen else {
++                // A line before any hello on this connection: ask for one, once.
++                guard linked, !invited else { return [] }
++                invited = true
++                return [.send(MediaLine.hello(on: on, id: nil))]
++            }
++            lastLine = now
++            guard on else { return [] }
++            return take(s, now: now)
++        }
++    }
++
++    private mutating func take(_ s: GuestState, now: Double) -> [Effect] {
++        let wasPlaying = last?.status == .playing
++        last = s
++        if s.status != .none { info = s }
++        graceUntil = nil
++        waiting = false
++        var fx: [Effect] = []
++        switch s.status {
++        case .playing:
++            notPlayingSince = nil; stoppedSince = nil; pausedSince = nil
++            if !claimed {
++                if now >= lastTake + Self.retakeEvery { fx += claim(now) } else { waiting = true }
++            }
++        case .paused:
++            if wasPlaying || notPlayingSince == nil { notPlayingSince = now }
++            stoppedSince = nil
++            if pausedSince == nil { pausedSince = now }
++        case .stopped, .none:
++            if wasPlaying || notPlayingSince == nil { notPlayingSince = now }
++            pausedSince = nil
++            if stoppedSince == nil { stoppedSince = now }
++        }
++        return fx + settle(now)
++    }
++
++    private mutating func claim(_ now: Double) -> [Effect] {
++        claimed = true
++        shownPlaying = true
++        lastTake = now
++        held = nil
++        waiting = false
++        let player = last?.player ?? ""
++        return [.log("Now Playing is the VM (\(player.isEmpty ? "a player" : player) playing)")]
++    }
++
++    /// What is due at `now`: Now Playing's state after the waits, and giving up.
++    public mutating func tick(now: Double) -> [Effect] { settle(now) }
++
++    private mutating func settle(_ now: Double) -> [Effect] {
++        if !claimed, waiting, now >= lastTake + Self.retakeEvery { return claim(now) }
++        guard claimed, let s = last else { return [] }
++        if let h = held, now < h.until {
++            shownPlaying = h.playing
++        } else {
++            held = nil
++            if s.status == .playing {
++                if !shownPlaying, now >= lastTake + Self.retakeEvery {
++                    shownPlaying = true
++                    lastTake = now
++                }
++            } else if shownPlaying, let n = notPlayingSince, now >= n + Self.settle {
++                shownPlaying = false
++            }
++        }
++        if let t = stoppedSince, now >= t + Self.stopRelease { return release("nothing plays in the VM") }
++        if let p = pausedSince, now >= p + Self.pausedRelease { return release("paused for 30 minutes") }
++        if let g = graceUntil, now >= g { return release("the VM's agent started again and named no player") }
++        if !asleep, let l = lastLine, now >= l + Self.lease { return release("no word from the VM's agent for 45 s") }
++        return []
++    }
++
++    private mutating func release(_ why: String) -> [Effect] {
++        guard claimed else { return [] }
++        claimed = false
++        shownPlaying = false
++        held = nil
++        graceUntil = nil
++        return [.log("Now Playing given up (\(why))")]
++    }
++
++    /// The app's switch changed while the VM runs.
++    public mutating func switched(_ on: Bool, now: Double) -> [Effect] {
++        guard on != self.on else { return [] }
++        self.on = on
++        var fx: [Effect] = [.log("\(on ? "on" : "off") (switched while the VM runs)")]
++        // The agent's next state after the hello is fresh; nothing from before counts.
++        last = nil; info = nil
++        notPlayingSince = nil; stoppedSince = nil; pausedSince = nil
++        waiting = false
++        // The person's own switch: its first claim does not wait for the VM's 10 s.
++        if on { lastTake = -Double.infinity }
++        if linked, helloSeen { fx.append(.send(MediaLine.hello(on: on, id: guestID))) }
++        if !on { fx += release("the app's switch is off") }
++        return fx
++    }
++
++    /// A command from macOS (AirPods, Control Center, a play key): what to
++    /// send the VM, from the agent's own last state (not what Now Playing shows).
++    /// Within the hold after the Mac's own play or pause, the agent's state can
++    /// still be from before it: a toggle then goes from that command (a quick
++    /// double press of a play key pauses and plays).
++    public func command(_ c: RemoteCommand, now: Double) -> Answer {
++        guard claimed, on, let s = last else { return .notClaimed }
++        guard linked, helloSeen else { return .noLink }
++        switch c {
++        case .play: return .send(.play)
++        case .pause, .stop: return .send(.pause)
++        case .togglePlayPause:
++            var playing = s.status == .playing
++            if let h = held, now < h.until { playing = h.playing }
++            return .send(playing ? .pause : .play)
++        case .nextTrack: return .send(.next)
++        case .previousTrack: return .send(.previous)
++        }
++    }
++
++    /// The command went into the port: Now Playing follows at once (the
++    /// agent's next state confirms or corrects it).
++    public mutating func commandSent(_ c: RemoteCommand, _ m: MacCommand, now: Double) -> [Effect] {
++        switch m {
++        case .play:
++            held = (true, now + Self.commandHold)
++            shownPlaying = true
++            if last?.status != .playing { notPlayingSince = now }
++        case .pause:
++            held = (false, now + Self.commandHold)
++            shownPlaying = false
++        case .next, .previous:
++            break
++        }
++        return [.log("\(c.rawValue) from macOS: \(m.rawValue) to the VM's player")]
++    }
++
++    /// The Mac goes to sleep: the claim stays, the lease waits.
++    public mutating func sleep() { asleep = true }
++
++    /// The Mac woke: the lease starts again, and the agent is asked for a fresh state.
++    public mutating func wake(now: Double) -> [Effect] {
++        asleep = false
++        if lastLine != nil { lastLine = now }
++        guard linked, helloSeen else { return [] }
++        return [.send(MediaLine.hello(on: on, id: guestID))]
++    }
++
++    /// QEMU ended (or the launcher stops the VM): give Now Playing up now.
++    public mutating func stop(_ why: String) -> [Effect] {
++        linked = false
++        helloSeen = false
++        waiting = false
++        return release(why)
++    }
++}
+diff --git a/host/launcher/Sources/steamac-vm/OmacMediaProtocol.swift b/host/launcher/Sources/steamac-vm/OmacMediaProtocol.swift
+new file mode 100644
+index 0000000..08b488e
+--- /dev/null
++++ b/host/launcher/Sources/steamac-vm/OmacMediaProtocol.swift
+@@ -0,0 +1,251 @@
++// From OmacVM (github.com/gillesgoetsch/omacvm), MIT, (c) 2026 Gilles Goetsch:
++// app/app/Sources/OmacVMMedia/MediaProtocol.swift, unchanged. The org.omacvm.* guest agents expect exactly this protocol.
++import Foundation
++
++/// AirPods and media controls (docs/adr/0058-now-playing.md): the virtio port
++/// between OmacVM.app's launcher and the VM's agent omacvm-media
++/// (src/app/guest/omacvm-media), one JSON object per line, "t" says what.
++///
++/// From the VM:
++///   {"t":"hello","v":1,"n":"5f2c9a01"}   the agent started (n: this run's id);
++///                                        again every 5 s until the Mac answers
++///   {"t":"state","s":"playing","player":"Chromium","title":"..","artist":"..",
++///    "album":"..","len":213.5,"pos":12.0,"rate":1.0,"next":true,"prev":false}
++///                                        what its player does (s: playing,
++///                                        paused, stopped, none): after the
++///                                        Mac's hello, on every change, every
++///                                        15 s while it has a player
++/// To the VM:
++///   {"t":"hello","v":1,"on":true,"n":"5f2c9a01"}  the answer, with the agent's
++///                                        n (the agent takes only that one, so
++///                                        nothing left in the port from before
++///                                        counts); again when the switch changes
++///                                        and after the Mac wakes. Without n: "say
++///                                        hello again" (a line came before any
++///                                        hello on this connection)
++///   {"t":"cmd","c":"play|pause|next|previous"}
++///
++/// Both sides ignore what they do not know (t, keys, commands); the lower v
++/// counts. The guest is untrusted: a line is at most 4 KB and 20 a second, its
++/// text is cut to 200 characters (the player's name to 64) without control or
++/// direction characters, its numbers kept in range, nothing counts before its
++/// hello, and no picture comes from it.
++public enum MediaPort {
++    public static let name = "org.omacvm.media"
++    /// After mac-ime's 8; a port on vser0 moves no PCI device.
++    public static let number = 9
++    public static let version = 1
++
++    /// QEMU's arguments; `socket` as QEMU wants it (commas doubled).
++    public static func arguments(socket: String) -> [String] {
++        ["-chardev", "socket,id=media0,path=\(socket),server=on,wait=off",
++         "-device", "virtserialport,bus=vser0.0,nr=\(number),chardev=media0,name=\(name)"]
++    }
++}
++
++public enum MediaLimits {
++    public static let lineBytes = 4096
++    public static let linesPerSecond = 20
++    public static let text = 200
++    public static let player = 64
++    /// The guest's run id in its hello.
++    public static let id = 32
++    public static let longest = 86_400.0
++    public static let fastest = 4.0
++    /// JSON nesting: our lines have one object; deeper ones are not parsed.
++    public static let depth = 4
++}
++
++/// The app-wide switch "AirPods and media controls" (org.omacvm.app
++/// mediaControls). On by default; off by default for the test identity, so a
++/// test VM that plays never takes the person's AirPods.
++public enum MediaControls {
++    public static let key = "mediaControls"
++    public static func defaultOn(testIdentity: Bool) -> Bool { !testIdentity }
++}
++
++/// What the guest's player does, as the Mac reads it.
++public struct GuestState: Equatable, Sendable {
++    public enum Status: String, Sendable { case playing, paused, stopped, none }
++    public var status: Status
++    public var player = ""
++    public var title = ""
++    public var artist = ""
++    public var album = ""
++    public var length: Double?
++    public var position: Double?
++    public var rate = 1.0
++    public var canNext = false
++    public var canPrevious = false
++
++    public init(status: Status, player: String = "", title: String = "", artist: String = "", album: String = "",
++                length: Double? = nil, position: Double? = nil, rate: Double = 1.0,
++                canNext: Bool = false, canPrevious: Bool = false) {
++        self.status = status; self.player = player; self.title = title; self.artist = artist; self.album = album
++        self.length = length; self.position = position; self.rate = rate
++        self.canNext = canNext; self.canPrevious = canPrevious
++    }
++}
++
++public enum GuestMessage: Equatable, Sendable {
++    case hello(version: Int, id: String)
++    case state(GuestState)
++}
++
++/// What the Mac sends the VM's player. Never a toggle: AirPods pause when one
++/// comes out, and a toggle would start a paused video.
++public enum MacCommand: String, CaseIterable, Sendable { case play, pause, next, previous }
++
++public enum MediaLine {
++    /// One line from the guest (without its newline); nil for anything we do
++    /// not take.
++    public static func parse(_ line: Data) -> GuestMessage? {
++        guard line.count <= MediaLimits.lineBytes, shallow(line),
++              let o = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
++              let t = o["t"] as? String else { return nil }
++        switch t {
++        case "hello":
++            guard let v = integer(o["v"]), v >= 1 else { return nil }
++            let id = clean(o["n"], limit: MediaLimits.id)
++            return .hello(version: v, id: id)
++        case "state":
++            guard let raw = o["s"] as? String, let status = GuestState.Status(rawValue: raw) else { return nil }
++            var s = GuestState(status: status)
++            s.player = clean(o["player"], limit: MediaLimits.player)
++            s.title = clean(o["title"], limit: MediaLimits.text)
++            s.artist = clean(o["artist"], limit: MediaLimits.text)
++            s.album = clean(o["album"], limit: MediaLimits.text)
++            s.length = number(o["len"], in: 0...MediaLimits.longest).flatMap { $0 > 0 ? $0 : nil }
++            s.position = number(o["pos"], in: 0...MediaLimits.longest).map { min($0, s.length ?? $0) }
++            s.rate = number(o["rate"], in: 0...MediaLimits.fastest) ?? 1.0
++            s.canNext = flag(o["next"])
++            s.canPrevious = flag(o["prev"])
++            return .state(s)
++        default:
++            return nil
++        }
++    }
++
++    public static func hello(on: Bool, id: String?) -> Data {
++        var o: [String: Any] = ["t": "hello", "v": MediaPort.version, "on": on]
++        if let id { o["n"] = id }
++        return encode(o)
++    }
++
++    public static func command(_ c: MacCommand) -> Data { encode(["t": "cmd", "c": c.rawValue]) }
++
++    static func encode(_ o: [String: Any]) -> Data {
++        var d = (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data("{}".utf8)
++        d.append(0x0A)
++        return d
++    }
++
++    /// The guest's text as the Mac shows it: a string cut to `limit`
++    /// characters (Unicode scalars), without control, line break or direction
++    /// characters; anything else is "".
++    public static func clean(_ v: Any?, limit: Int) -> String {
++        guard let s = v as? String else { return "" }
++        var out = String.UnicodeScalarView()
++        var n = 0
++        for u in s.unicodeScalars where !hidden(u) {
++            if n == limit { break }
++            out.append(u)
++            n += 1
++        }
++        return String(out).trimmingCharacters(in: .whitespaces)
++    }
++
++    static func hidden(_ u: Unicode.Scalar) -> Bool {
++        switch u.value {
++        case 0x00...0x1F, 0x7F...0x9F: return true   // control characters
++        case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069: return true   // text direction
++        case 0x2028, 0x2029: return true   // line and paragraph breaks
++        default: return false
++        }
++    }
++
++    /// At most MediaLimits.depth objects or arrays inside each other (strings
++    /// skipped), so a crafted line never makes the parser go deep.
++    static func shallow(_ line: Data) -> Bool {
++        var depth = 0, inString = false, escaped = false
++        for b in line {
++            if inString {
++                if escaped { escaped = false } else if b == 0x5C { escaped = true } else if b == 0x22 { inString = false }
++                continue
++            }
++            switch b {
++            case 0x22: inString = true
++            case 0x7B, 0x5B:
++                depth += 1
++                if depth > MediaLimits.depth { return false }
++            case 0x7D, 0x5D: depth -= 1
++            default: break
++            }
++        }
++        return true
++    }
++
++    static func isBool(_ v: Any?) -> Bool {
++        guard let n = v as? NSNumber else { return false }
++        return CFGetTypeID(n) == CFBooleanGetTypeID()
++    }
++
++    static func flag(_ v: Any?) -> Bool { isBool(v) && (v as? Bool) == true }
++
++    static func integer(_ v: Any?) -> Int? {
++        guard !isBool(v), let n = v as? NSNumber, let d = Double(exactly: n.doubleValue), d.isFinite,
++              d == d.rounded(), abs(d) < 1e9 else { return nil }
++        return Int(d)
++    }
++
++    static func number(_ v: Any?, in range: ClosedRange<Double>) -> Double? {
++        guard !isBool(v), let n = v as? NSNumber else { return nil }
++        let d = n.doubleValue
++        guard d.isFinite else { return nil }
++        return min(max(d, range.lowerBound), range.upperBound)
++    }
++}
++
++/// Cuts the port's bytes into lines: at most 4 KB each (a longer one is
++/// dropped up to its newline), at most 20 a second (more are dropped).
++public struct MediaLines {
++    private var buffer = [UInt8]()
++    private var skipping = false
++    private var second = -Double.infinity
++    private var inSecond = 0
++    public private(set) var droppedLong = 0
++    public private(set) var droppedFast = 0
++
++    public init() {}
++
++    public mutating func feed<C: Collection>(_ bytes: C, now: Double) -> [Data] where C.Element == UInt8 {
++        var lines: [Data] = []
++        for b in bytes {
++            if b == 0x0A {
++                if skipping {
++                    skipping = false
++                } else if take(now: now) {
++                    lines.append(Data(buffer))
++                }
++                buffer.removeAll(keepingCapacity: true)
++                continue
++            }
++            guard !skipping else { continue }
++            if buffer.count == MediaLimits.lineBytes {
++                buffer.removeAll(keepingCapacity: true)
++                skipping = true
++                droppedLong += 1
++                continue
++            }
++            buffer.append(b)
++        }
++        return lines
++    }
++
++    private mutating func take(now: Double) -> Bool {
++        if now - second >= 1 { second = now; inSecond = 0 }
++        guard inSecond < MediaLimits.linesPerSecond else { droppedFast += 1; return false }
++        inSecond += 1
++        return true
++    }
++}
+diff --git a/host/launcher/Sources/steamac-vm/OmacVM.swift b/host/launcher/Sources/steamac-vm/OmacVM.swift
+new file mode 100644
+index 0000000..2067a79
+--- /dev/null
++++ b/host/launcher/Sources/steamac-vm/OmacVM.swift
+@@ -0,0 +1,458 @@
++// OmacVM.app's Mac-side features for the guest's org.omacvm.* agents (nixos-gpu-vm): the Mac's
++// battery, AirPods and media controls, the camera and Touch ID. Ported from OmacVM
++// (github.com/gillesgoetsch/omacvm), MIT, (c) 2026 Gilles Goetsch: NativeBatteryBridge.swift,
++// NativeMediaBridge.swift, NowPlaying.swift and the Runner's wiring. The line protocols are
++// omacvm's, byte for byte; what differs is the transport: a virtio-console port of libkrun
++// instead of QEMU's chardev socket, so there is exactly one connection per launcher run and no
++// reconnect.
++import Darwin
++import Foundation
++import IOKit.ps
++import MediaPlayer
++
++/// One org.omacvm.* virtio-console port. One end of a Unix socketpair goes to libkrun as the
++/// port's input and output (it dups both); the launcher reads and writes the other end, `fd`, as
++/// omacvm's bridges did QEMU's socket. Data the guest has not opened the port for waits in the
++/// socket (libkrun stops taking it once the guest's queue is full).
++final class OmacPort {
++    let name: String
++    /// Ours.
++    let fd: Int32
++    /// Handed to libkrun as input and output.
++    let guestFd: Int32
++
++    init(_ name: String) throws {
++        var p: [Int32] = [0, 0]
++        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &p) == 0 else {
++            throw OptionError("socketpair(\(name)): \(String(cString: strerror(errno)))")
++        }
++        for f in p {
++            _ = fcntl(f, F_SETFD, FD_CLOEXEC)
++            var one: Int32 = 1
++            setsockopt(f, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
++        }
++        self.name = name
++        fd = p[0]
++        guestFd = p[1]
++    }
++
++    /// Every byte, blocking; false when the socket failed.
++    @discardableResult
++    func writeAll(_ data: Data) -> Bool {
++        data.withUnsafeBytes { b in
++            var off = 0
++            while off < b.count {
++                let n = Darwin.write(fd, b.baseAddress! + off, b.count - off)
++                if n > 0 { off += n } else if n < 0 && errno == EINTR { continue } else { return false }
++            }
++            return true
++        }
++    }
++}
++
++/// The ports this run gives the guest (Options: each one can be switched off) and their Mac sides.
++final class OmacVMBridges {
++    let ports: [OmacPort]
++    private let battery: OmacBatteryBridge?
++    private let media: OmacMediaBridge?
++    private let camera: OmacPort?
++    private let auth: AuthRelay?
++    private let cameraHub: CameraHub?
++    /// Touch ID's VM name for the Bridge: its key is vm-keys/<sha256("app/" + name)[:32]>.touchid
++    /// in ~/Library/Application Support/omacvm (modules/features/omacvm-bridge).
++    static let vmName = "nixos-gpu-vm"
++
++    init(options o: Options) throws {
++        var ports: [OmacPort] = []
++        func port(_ on: Bool, _ name: String) throws -> OmacPort? {
++            guard on else { return nil }
++            let p = try OmacPort(name)
++            ports.append(p)
++            return p
++        }
++        battery = try port(o.omacBattery, "org.omacvm.battery").map(OmacBatteryBridge.init)
++        media = try port(o.omacMedia, MediaPort.name).map(OmacMediaBridge.init)
++        camera = try port(o.omacCamera, "org.omacvm.camera")
++        cameraHub = camera.map { _ in CameraHub { log("camera: \($0)") } }
++        auth = try port(o.touchID, "org.omacvm.auth").map { p in
++            AuthRelay(guest: p.fd, connectBridge: { AuthRelay.connectBridge() },
++                      headers: { AuthRelay.relayHeaders(vmName: OmacVMBridges.vmName) },
++                      log: { log("touch id: \($0)") })
++        }
++        self.ports = ports
++        log("omacvm: ports " + (ports.isEmpty ? "none" : ports.map(\.name).joined(separator: ", ")))
++    }
++
++    /// After the VM is configured (ports attached); main thread.
++    func start() {
++        battery?.start()
++        media?.start()
++        if let camera, let cameraHub {
++            Thread.detachNewThread { cameraHub.run(fd: camera.fd, label: "guest") }
++        }
++        if let auth {
++            Thread.detachNewThread {
++                do { try auth.run() } catch { log("touch id: \(error.localizedDescription)") }
++            }
++        }
++    }
++
++    /// The VM sleeps (SuspendController) or wakes: media controls follow (MediaClaim).
++    func vmPaused(_ paused: Bool) { media?.vmPaused(paused) }
++}
++
++// MARK: Battery (NativeBatteryBridge)
++
++/// The Mac's battery to the guest's omacvm-battery over org.omacvm.battery: one JSON snapshot per
++/// line (OmacHostBattery.swift) on every change of the Mac's power sources and every 30 seconds,
++/// only after the agent asked once ({"type":"refresh"}). Any other line is ignored.
++final class OmacBatteryBridge: @unchecked Sendable {
++    static let heartbeatSeconds = 30.0
++    static let maximumLineBytes = 4096
++
++    private let port: OmacPort
++    private let stateQueue = DispatchQueue(label: "org.omacvm.battery-bridge")
++    private var lastSent: HostBatterySnapshot?
++    private var guestListening = false
++    private var heartbeat: DispatchSourceTimer?
++    private var failed = false
++
++    init(port: OmacPort) { self.port = port }
++
++    static func isRefreshRequest(_ line: Data) -> Bool {
++        (try? JSONSerialization.jsonObject(with: line) as? [String: Any])?["type"] as? String == "refresh"
++    }
++
++    func start() {
++        // IOKit's power notifications on the main run loop (the read loop has its own thread).
++        let context = Unmanaged.passUnretained(self).toOpaque()
++        if let source = IOPSNotificationCreateRunLoopSource({ context in
++            guard let context else { return }
++            Unmanaged<OmacBatteryBridge>.fromOpaque(context).takeUnretainedValue().send(forced: false)
++        }, context)?.takeRetainedValue() {
++            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
++        } else {
++            log("battery: no IOKit power notifications; every 30 s only")
++        }
++        let timer = DispatchSource.makeTimerSource(queue: stateQueue)
++        timer.schedule(deadline: .now() + Self.heartbeatSeconds, repeating: Self.heartbeatSeconds, leeway: .seconds(1))
++        timer.setEventHandler { [weak self] in self?.sendOnQueue(forced: true) }
++        timer.resume()
++        heartbeat = timer
++        let t = Thread { [self] in readLoop() }
++        t.name = "org.omacvm.battery"
++        t.start()
++    }
++
++    private func readLoop() {
++        var line = Data(), skipping = false
++        var chunk = [UInt8](repeating: 0, count: 4096)
++        while true {
++            let count = chunk.withUnsafeMutableBytes { Darwin.read(port.fd, $0.baseAddress, $0.count) }
++            if count < 0 && errno == EINTR { continue }
++            guard count > 0 else { return }
++            var start = 0
++            for index in 0..<count where chunk[index] == 0x0A {
++                if !skipping {
++                    line.append(contentsOf: chunk[start..<index])
++                    // In step with the write, so a guest that floods requests waits for its answers.
++                    if Self.isRefreshRequest(line) {
++                        stateQueue.sync { guestListening = true; sendOnQueue(forced: true) }
++                    }
++                }
++                line.removeAll(keepingCapacity: true)
++                skipping = false
++                start = index + 1
++            }
++            if !skipping {
++                line.append(contentsOf: chunk[start..<count])
++                if line.count > Self.maximumLineBytes { line.removeAll(); skipping = true }
++            }
++        }
++    }
++
++    private func send(forced: Bool) {
++        stateQueue.async { [weak self] in self?.sendOnQueue(forced: forced) }
++    }
++
++    /// Only on stateQueue. Unchanged snapshots go only when forced.
++    private func sendOnQueue(forced: Bool) {
++        guard guestListening, !failed else { return }
++        let snapshot = HostBatterySnapshot.capture()
++        guard forced || snapshot != lastSent else { return }
++        if port.writeAll(snapshot.line) {
++            lastSent = snapshot
++        } else {
++            failed = true
++            log("battery: cannot write the guest's port: \(String(cString: strerror(errno)))")
++        }
++    }
++}
++
++// MARK: AirPods and media controls (NativeMediaBridge, MediaSession, NowPlaying)
++
++/// The launcher's end of org.omacvm.media: reads the guest's lines on a thread (MediaLines: 4 KB,
++/// 20 a second) and hands each message to the main thread, which owns the rest. Writes never
++/// block (MSG_DONTWAIT): a full port drops the line, and the rest of a part-sent line goes out
++/// first, with the next line or the session's retry a second later.
++final class OmacMediaBridge: @unchecked Sendable {
++    private let port: OmacPort
++    private var pending = Data()     // main thread
++    private var session: MediaSession?
++
++    init(port: OmacPort) { self.port = port }
++
++    func start() {
++        let s = MainActor.assumeIsolated { MediaSession(on: true, bridge: self) }
++        session = s
++        let t = Thread { [self] in
++            var lines = MediaLines()
++            var chunk = [UInt8](repeating: 0, count: 4096)
++            var long = 0, fast = 0
++            while true {
++                let n = chunk.withUnsafeMutableBytes { Darwin.read(port.fd, $0.baseAddress, $0.count) }
++                if n < 0, errno == EINTR { continue }
++                guard n > 0 else { return }
++                let now = ProcessInfo.processInfo.systemUptime
++                for line in lines.feed(chunk[0..<n], now: now) {
++                    guard let m = MediaLine.parse(line) else { continue }
++                    DispatchQueue.main.async { MainActor.assumeIsolated { s.received(m) } }
++                }
++                if lines.droppedLong != long || lines.droppedFast != fast {
++                    let why = lines.droppedLong != long ? "over 4 KB" : "over 20 a second"
++                    long = lines.droppedLong; fast = lines.droppedFast
++                    DispatchQueue.main.async { MainActor.assumeIsolated { s.dropped(why) } }
++                }
++            }
++        }
++        t.name = "org.omacvm.media"
++        t.start()
++    }
++
++    func vmPaused(_ paused: Bool) {
++        guard let s = session else { return }
++        MainActor.assumeIsolated { paused ? s.sleep() : s.wake() }
++    }
++
++    @MainActor var hasPending: Bool { !pending.isEmpty }
++
++    /// The rest of a part-sent line, without waiting: true when nothing is left.
++    @MainActor func flush() -> Bool {
++        if !pending.isEmpty {
++            let n = send(pending)
++            pending.removeFirst(max(0, n))
++        }
++        return pending.isEmpty
++    }
++
++    /// One line to the guest, without waiting: false when the port did not take it.
++    @MainActor func write(_ line: Data) -> Bool {
++        guard flush() else { return false }
++        let n = send(line)
++        if n <= 0 { return false }
++        if n < line.count { pending = line.subdata(in: n..<line.count) }
++        return true
++    }
++
++    @MainActor private func send(_ d: Data) -> Int {
++        d.withUnsafeBytes { b in
++            while true {
++                let n = Darwin.send(port.fd, b.baseAddress, b.count, MSG_DONTWAIT)
++                if n < 0, errno == EINTR { continue }
++                return n
++            }
++        }
++    }
++}
++
++/// omacvm's MediaSession (NowPlaying.swift) on one port that never closes: while the guest
++/// plays, this process is the Mac's Now Playing app, so AirPods, Control Center and the play keys
++/// reach the guest's player. MediaClaim owns the rules, with the uptime as its clock. The switch
++/// is the launcher option (--no-omacvm-media leaves the port out instead), so it never changes.
++@MainActor
++final class MediaSession {
++    private var claim: MediaClaim
++    private let bridge: OmacMediaBridge
++    private var timer: Timer?
++    private var retry: Timer?
++    private var unsent: Data?
++    private var lastDropLog = -Double.infinity
++    private var stopped = false
++
++    static var now: Double { ProcessInfo.processInfo.systemUptime }
++
++    init(on: Bool, bridge: OmacMediaBridge) {
++        self.bridge = bridge
++        claim = MediaClaim(on: on)
++        claim.connected()
++    }
++
++    func received(_ m: GuestMessage) {
++        guard !stopped else { return }
++        run(claim.received(m, now: Self.now))
++    }
++
++    func dropped(_ why: String) {
++        let now = Self.now
++        guard now - lastDropLog >= 60 else { return }
++        lastDropLog = now
++        log("media controls: lines from the guest dropped (\(why))")
++    }
++
++    func sleep() { claim.sleep(); schedule() }
++    func wake() { run(claim.wake(now: Self.now)) }
++
++    func stop(_ why: String) {
++        guard !stopped else { return }
++        run(claim.stop(why))
++        stopped = true
++        timer?.invalidate()
++        timer = nil
++        retry?.invalidate()
++        retry = nil
++        NowPlaying.shared.release(for: self)
++    }
++
++    private func run(_ fx: [MediaClaim.Effect]) {
++        for e in fx {
++            switch e {
++            case .send(let line): unsent = bridge.write(line) ? nil : line
++            case .log(let line): log("media controls: \(line)")
++            }
++        }
++        retryLater()
++        apply()
++    }
++
++    private func retryLater() {
++        guard retry == nil, bridge.hasPending || unsent != nil else { return }
++        let t = Timer(timeInterval: 1, repeats: false) { [weak self] _ in
++            MainActor.assumeIsolated {
++                guard let self else { return }
++                self.retry = nil
++                guard !self.stopped else { return }
++                if let line = self.unsent {
++                    if self.bridge.write(line) { self.unsent = nil }
++                } else {
++                    _ = self.bridge.flush()
++                }
++                self.retryLater()
++            }
++        }
++        RunLoop.main.add(t, forMode: .common)
++        retry = t
++    }
++
++    private func apply() {
++        guard !stopped else { return }
++        NowPlaying.shared.show(claim.shown, for: self)
++        schedule()
++    }
++
++    private func schedule() {
++        timer?.invalidate()
++        timer = nil
++        guard let at = claim.deadline else { return }
++        let t = Timer(timeInterval: max(0.05, at - Self.now), repeats: false) { [weak self] _ in
++            MainActor.assumeIsolated {
++                guard let self, !self.stopped else { return }
++                self.run(self.claim.tick(now: Self.now))
++            }
++        }
++        RunLoop.main.add(t, forMode: .common)
++        timer = t
++    }
++
++    func command(_ c: RemoteCommand) -> MPRemoteCommandHandlerStatus {
++        switch claim.command(c, now: Self.now) {
++        case .notClaimed:
++            return .noActionableNowPlayingItem
++        case .noLink:
++            log("media controls: \(c.rawValue) from macOS: not sent (the guest's agent is not connected)")
++            return .commandFailed
++        case .send(let m):
++            guard bridge.write(MediaLine.command(m)) else {
++                log("media controls: \(c.rawValue) from macOS: not sent (the guest's port is full)")
++                return .commandFailed
++            }
++            run(claim.commandSent(c, m, now: Self.now))
++            return .success
++        }
++    }
++}
++
++/// The process's Now Playing registration (omacvm's NowPlaying, unchanged but for the names).
++@MainActor
++final class NowPlaying {
++    static let shared = NowPlaying()
++    private weak var owner: MediaSession?
++    private var registered = false
++    private var infoGate = MediaClaim.InfoGate()
++
++    private var commands: [(MPRemoteCommand, RemoteCommand)] {
++        let c = MPRemoteCommandCenter.shared()
++        return [(c.playCommand, .play), (c.pauseCommand, .pause), (c.togglePlayPauseCommand, .togglePlayPause),
++                (c.stopCommand, .stop), (c.nextTrackCommand, .nextTrack), (c.previousTrackCommand, .previousTrack)]
++    }
++
++    private var unused: [MPRemoteCommand] {
++        let c = MPRemoteCommandCenter.shared()
++        return [c.skipForwardCommand, c.skipBackwardCommand, c.seekForwardCommand, c.seekBackwardCommand,
++                c.changePlaybackPositionCommand, c.changePlaybackRateCommand, c.changeRepeatModeCommand,
++                c.changeShuffleModeCommand, c.ratingCommand, c.likeCommand, c.dislikeCommand, c.bookmarkCommand,
++                c.enableLanguageOptionCommand, c.disableLanguageOptionCommand]
++    }
++
++    func show(_ s: MediaClaim.Shown?, for session: MediaSession) {
++        guard let s else {
++            release(for: session)
++            return
++        }
++        owner = session
++        if !registered {
++            for (cmd, rc) in commands {
++                cmd.isEnabled = true
++                cmd.addTarget { _ in
++                    if Thread.isMainThread { return MainActor.assumeIsolated { NowPlaying.shared.handle(rc) } }
++                    return DispatchQueue.main.sync { MainActor.assumeIsolated { NowPlaying.shared.handle(rc) } }
++                }
++            }
++            for cmd in unused { cmd.isEnabled = false }
++            registered = true
++        }
++        let c = MPRemoteCommandCenter.shared()
++        if c.nextTrackCommand.isEnabled != s.canNext { c.nextTrackCommand.isEnabled = s.canNext }
++        if c.previousTrackCommand.isEnabled != s.canPrevious { c.previousTrackCommand.isEnabled = s.canPrevious }
++        let center = MPNowPlayingInfoCenter.default()
++        if infoGate.needsSet(s, now: MediaSession.now) {
++            var info: [String: Any] = [MPMediaItemPropertyTitle: s.title,
++                                       MPNowPlayingInfoPropertyPlaybackRate: s.rate,
++                                       MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue]
++            if !s.artist.isEmpty { info[MPMediaItemPropertyArtist] = s.artist }
++            if !s.album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = s.album }
++            if let d = s.duration { info[MPMediaItemPropertyPlaybackDuration] = d }
++            if let e = s.elapsed { info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = e }
++            center.nowPlayingInfo = info
++        }
++        let state: MPNowPlayingPlaybackState = s.playing ? .playing : .paused
++        if center.playbackState != state { center.playbackState = state }
++    }
++
++    func release(for session: MediaSession) {
++        guard registered, owner == nil || owner === session else { return }
++        for (cmd, _) in commands {
++            cmd.removeTarget(nil)
++            cmd.isEnabled = false
++        }
++        let center = MPNowPlayingInfoCenter.default()
++        center.nowPlayingInfo = nil
++        center.playbackState = .stopped
++        registered = false
++        infoGate.cleared()
++        owner = nil
++    }
++
++    private func handle(_ c: RemoteCommand) -> MPRemoteCommandHandlerStatus {
++        owner?.command(c) ?? .noActionableNowPlayingItem
++    }
++}
+diff --git a/host/launcher/Sources/steamac-vm/Options.swift b/host/launcher/Sources/steamac-vm/Options.swift
+index 4c90eb5..3ef0940 100644
+--- a/host/launcher/Sources/steamac-vm/Options.swift
++++ b/host/launcher/Sources/steamac-vm/Options.swift
+@@ -120,6 +120,14 @@ struct Options {
+     var autoCapture: Bool?
+     /// The guest gets gamepads over fx.pad, fx.pad2, … (`--no-gamepad`: no ports, no pads this run).
+     var gamepad = true
++    /// OmacVM's Mac-side features for the guest's org.omacvm.* agents (OmacVM.swift), each on
++    /// unless switched off: --no-omacvm-battery, --no-omacvm-media, --no-omacvm-camera,
++    /// --no-touchid; --no-fullpanel: full screen stays below the notch (FullPanel.swift).
++    var omacBattery = true
++    var omacMedia = true
++    var omacCamera = true
++    var touchID = true
++    var fullPanel = true
+     /// `--pad`: what the guest's gamepad is this run (instead of Settings > Controller).
+     var padType: LauncherSettings.PadType?
+     var krunLogLevel: UInt32 = 2
+@@ -171,6 +179,7 @@ struct Options {
+                       [--no-crash-reports] [--steam-client frame|deck|deckbeta]
+                       [--vulkan-driver moltenvk|kosmickrisp] [--lan-remote-play | --no-lan-remote-play]
+                       [--wmtr-lib PATH | --no-wmtr]
++                      [--no-omacvm-battery] [--no-omacvm-media] [--no-omacvm-camera] [--no-touchid] [--no-fullpanel]
+            steamac-vm --selftest-display [--headless] [--selftest-out DIR] [--display WxH]
+            steamac-vm --selftest-overlay [--selftest-out DIR] [--display WxH]
+            steamac-vm --selftest-stall [--selftest-out DIR] [--display WxH]
+@@ -247,6 +256,11 @@ struct Options {
+                            only for other guest compositors). capture: always click-to-capture.
+       --auto-capture on|off  auto mode: capture on click in games, for this run (default: the saved
+                            setting, menu Mouse > Auto-Capture Mouse in Games; per-game overrides apply)
++      --no-omacvm-battery, --no-omacvm-media, --no-omacvm-camera, --no-touchid
++                           leave out the org.omacvm.* port of the Mac's battery, AirPods and media
++                           controls, camera or Touch ID (default: all on, for omacvm's guest agents)
++      --no-fullpanel       full screen on a MacBook with a notch stays below it (default: it covers
++                           the whole panel and the guest gets omacvm.fullpanel=LxRxHxWxD)
+       --no-gamepad         no virtual gamepad this run (default: Settings > Controller "Virtual
+                            controller", which applies while the VM runs)
+       --pad TYPE           what the virtual gamepad is in SteamOS this run (default: Settings >
+@@ -449,6 +463,11 @@ struct Options {
+                 guard v == "on" || v == "off" else { throw OptionError("--auto-capture: on or off") }
+                 o.autoCapture = v == "on"
+             case "--no-gamepad": o.gamepad = false
++            case "--no-omacvm-battery": o.omacBattery = false
++            case "--no-omacvm-media": o.omacMedia = false
++            case "--no-omacvm-camera": o.omacCamera = false
++            case "--no-touchid": o.touchID = false
++            case "--no-fullpanel": o.fullPanel = false
+             case "--pad":
+                 let v = try value(a)
+                 guard let t = LauncherSettings.PadType(rawValue: v) else {
+diff --git a/host/launcher/Sources/steamac-vm/VM.swift b/host/launcher/Sources/steamac-vm/VM.swift
+index 6e30a96..0dd5729 100644
+--- a/host/launcher/Sources/steamac-vm/VM.swift
++++ b/host/launcher/Sources/steamac-vm/VM.swift
+@@ -38,7 +38,7 @@ final class VM {
+ 
+     init(options o: Options, display: DisplayBackend, console: Console, progressPort: ProgressPort?,
+          clockPort: ClockPort?, sleepPort: SleepPort?, padPorts: [PadPort], clipboardPort: ClipboardPort?,
+-         inputs: VMInputs?, netSocket: String?) throws {
++         omacPorts: [OmacPort] = [], inputs: VMInputs?, netSocket: String?) throws {
+         VM.raiseFileLimit()
+         try krun("krun_init_log", krun_init_log(KRUN_LOG_TARGET_DEFAULT, o.krunLogLevel, UInt32(KRUN_LOG_STYLE_AUTO), 0))
+         ctx = UInt32(try krun("krun_create_ctx", krun_create_ctx()))
+@@ -77,6 +77,12 @@ final class VM {
+                      krun_add_console_port_inout(ctx, UInt32(con), ClipboardPort.name, c.guestInputFd, c.guestOutputFd))
+         }
+ 
++        // OmacVM's guest agents (org.omacvm.*: battery, media, camera, auth; OmacVMBridges).
++        for p in omacPorts {
++            try krun("krun_add_console_port_inout(\(p.name))",
++                     krun_add_console_port_inout(ctx, UInt32(con), p.name, p.guestFd, p.guestFd))
++        }
++
+         try krun("krun_set_kernel", krun_set_kernel(ctx, o.kernel, STEAMAC_KERNEL_FORMAT_RAW, o.initrd, o.cmdline))
+ 
+         for (i, d) in o.disks.enumerated() {
+diff --git a/host/launcher/Sources/steamac-vm/Window.swift b/host/launcher/Sources/steamac-vm/Window.swift
+index 81aefdc..c81905e 100644
+--- a/host/launcher/Sources/steamac-vm/Window.swift
++++ b/host/launcher/Sources/steamac-vm/Window.swift
+@@ -30,6 +30,7 @@ final class WindowController: NSObject, NSWindowDelegate {
+     /// Launcher settings (live values: overlay, follow window size, mouse auto-capture).
+     let settings: LauncherSettings
+     private var subscriptions: [AnyCancellable] = []
++    private var spaceObservers: [NSObjectProtocol] = []
+     /// FX boot/shutdown overlay, layered over the Metal view.
+     let overlay: OverlayView
+     /// "Still working" card shown when the guest GPU goes idle (StallMonitor), above the overlay.
+@@ -128,6 +129,7 @@ final class WindowController: NSObject, NSWindowDelegate {
+         window.contentView = view
+         window.delegate = self
+         window.collectionBehavior = [.fullScreenPrimary, .managed]
++        FullPanel.window = window
+         window.acceptsMouseMovedEvents = true
+         window.isReleasedWhenClosed = false
+         window.backgroundColor = .black
+@@ -155,6 +157,17 @@ final class WindowController: NSObject, NSWindowDelegate {
+         resumeChip.frame = view.bounds
+         view.addSubview(resumeChip)
+         updateTitle()
++        // FullPanel: after Mission Control, a Space switch or Command-Tab, once WindowServer has
++        // the window back in place.
++        for (center, name) in [(NSWorkspace.shared.notificationCenter, NSWorkspace.activeSpaceDidChangeNotification),
++                               (NotificationCenter.default, NSApplication.didBecomeActiveNotification)] {
++            spaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
++                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
++                    guard let self else { return }
++                    FullPanel.reassert(self.window)
++                }
++            })
++        }
+         // @Published fires before the change: evaluate on the next main-queue turn.
+         subscriptions.append(settings.$followWindowSize.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] on in
+             log("display: follow window size \(on ? "on" : "off")")
+@@ -299,6 +312,7 @@ final class WindowController: NSObject, NSWindowDelegate {
+     func windowWillExitFullScreen(_ notification: Notification) { inFullScreenTransition = true }
+     func windowDidEnterFullScreen(_ notification: Notification) {
+         inFullScreenTransition = false
++        FullPanel.reassert(window)
+         scheduleGuestResize()
+         refreshHostCursor()
+     }
+@@ -312,6 +326,10 @@ final class WindowController: NSObject, NSWindowDelegate {
+         }
+     }
+     func windowDidFailToEnterFullScreen(_ window: NSWindow) { inFullScreenTransition = false }
++    /// FullPanel (a MacBook's notch): the menu bar and the Dock held back.
++    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
++        FullPanel.options(window, proposed: proposedOptions)
++    }
+     func windowDidFailToExitFullScreen(_ window: NSWindow) { inFullScreenTransition = false }
+ 
+     func setStatus(_ status: String?) {
+diff --git a/host/launcher/Sources/steamac-vm/main.swift b/host/launcher/Sources/steamac-vm/main.swift
+index d716f04..1cf236b 100644
+--- a/host/launcher/Sources/steamac-vm/main.swift
++++ b/host/launcher/Sources/steamac-vm/main.swift
+@@ -367,9 +367,14 @@ do {
+     let padPorts = options.headless || !options.gamepad ? [] : try (0..<GamepadBridge.maxPads).map { try PadPort(player: $0) }
+     // Clipboard sharing follows the app's activation (ClipboardSync): window only.
+     let clipboardPort = options.headless ? nil : try ClipboardPort()
++    // OmacVM's Mac side for the guest's org.omacvm.* agents (OmacVM.swift), and full screen over
++    // the notch (FullPanel: the guest gets the notch on its command line).
++    let omac = try OmacVMBridges(options: options)
++    if let p = FullPanel.prepare(options) { options.cmdline += " " + p }
+     let vm = try VM(options: options, display: display, console: console, progressPort: progressPort,
+                     clockPort: clockPort, sleepPort: sleepPort, padPorts: padPorts, clipboardPort: clipboardPort,
+-                    inputs: inputs, netSocket: Supervisor.netSocket)
++                    omacPorts: omac.ports, inputs: inputs, netSocket: Supervisor.netSocket)
++    omac.start()
+     lifecycle.vm = vm
+     let gamepad = padPorts.isEmpty ? nil : GamepadBridge(ports: padPorts, settings: settings, typeOverride: options.padType)
+     let sound = SoundControl()
+@@ -527,6 +532,7 @@ do {
+         noPicture.vmPaused = paused
+         gamepad?.vmPaused(paused)
+         clipboard?.vmPaused = paused
++        omac.vmPaused(paused)
+         gameStats.vmPaused = paused
+         if paused {
+             // Do not accept launches against a frozen guest; resume restores the opt-in listener.
+@@ -608,7 +614,7 @@ do {
+     console.start()
+     vm.start()
+     withExtendedLifetime((presenter, gamepad, progressPort, keyboardLayouts, supervisorWatch, perfSubscription, gamePause, suspender, clipboard,
+-                          gameStats, streamCapture, streamInput, streamHost, streamPrompt, streamSubscription, streamStatusSubscription)) {
++                          gameStats, streamCapture, streamInput, streamHost, streamPrompt, streamSubscription, streamStatusSubscription, omac)) {
+         app.run()
+     }
+ } catch let error as DiskLock.InUse {

@@ -1,0 +1,24 @@
+# The Mac's side through OmacVM Bridge (../default.nix): one event stream for the plugin,
+# the Mac's media keys as Noctalia's OSD, a bar widget, and the launcher's /mac to switch.
+id = "nixos-gpu-vm/mac"
+name = "Mac"
+version = "1.0.0"
+plugin_api = 39 # noctalia.osd
+author = "nixos-gpu-vm"
+description = "The Mac's Wi-Fi, sound, Bluetooth and Night Shift through OmacVM Bridge."
+
+[[service]]
+id = "events"
+entry = "events.luau"
+
+[[widget]]
+id = "status"
+entry = "widget.luau"
+  [widget.actions]
+  left = "panel-toggle launcher /mac"
+
+[[launcher_provider]]
+id = "mac"
+entry = "launcher.luau"
+prefix = "mac"
+glyph = "brand-apple"
