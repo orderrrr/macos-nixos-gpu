@@ -43,18 +43,6 @@ The VM shares one Mac folder, `~/VM`. This checkout lives in it and is bound to 
 anything else you put in `~/VM` shows up in the VM's home as a link of the same name (and
 disappears when you remove it on the Mac).
 
-## sudo password
-
-sudo asks for a password, whose hash lives outside the repo in `/persist/passwords/<user>`.
-Make it once, from the Mac (root logs in with your SSH key only):
-
-```sh
-ssh -t -p 2222 root@127.0.0.1 'install -d -m 700 /persist/passwords &&
-  nix run nixpkgs#mkpasswd > /persist/passwords/<user> && chmod 600 /persist/passwords/<user>'
-```
-
-Then reboot the VM (or rebuild) so the account picks it up.
-
 ## Changing the system
 
 Edit this checkout from either side, then in the guest:
@@ -83,8 +71,8 @@ the VM uses; `meta.nix` holds the user's name and email.
   version. Regenerate it when nixpkgs moves `linux_latest` (see the comment in `boot.nix`).
 - virtio-fs on macOS doesn't confine the guest to the shared folder by itself: root in the
   guest (it controls the kernel) could reach any path your Mac user can. The libkrun patch here
-  rejects `.`, `..` and `/` in names and keeps symlinks unfollowed, and sudo needs a password;
-  still, share only what you want the VM to see.
+  rejects `.`, `..` and `/` in names and keeps symlinks unfollowed; still, share only what you
+  want the VM to see (sudo in the guest needs no password).
 
 ## Licences
 
