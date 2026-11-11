@@ -99,5 +99,16 @@ _: {
       systemd.services."serial-getty@hvc0".enable = false;
       # The journal is on /persist and journald maps its files, which had grown to 80 MB.
       services.journald.settings.Journal.SystemMaxUse = "50M";
+      # Free guest pages go back to macOS through the balloon's free page reporting, which by
+      # default only reports 2 MB blocks; freed memory is mostly scattered, so 16 KB (a Mac page)
+      # returned 450 MB more. File cache isn't free, and macOS already caches the same disk
+      # image, so clean cache is dropped every 5 minutes for the balloon to report.
+      systemd.tmpfiles.settings.page-reporting."/sys/module/page_reporting/parameters/page_reporting_order".w.argument =
+        "2";
+      systemd.services.drop-page-cache = {
+        startAt = "*:0/5";
+        serviceConfig.Type = "oneshot";
+        script = "echo 1 > /proc/sys/vm/drop_caches";
+      };
     };
 }
