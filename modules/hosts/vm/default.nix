@@ -24,8 +24,8 @@
     ];
   };
 
-  # `nix run`: boot the guest in steamac's launcher, sharing ~/VM (this repo and anything else
-  # you put there; features/mac-share).
+  # `nix run`: boot the guest in steamac's launcher, sharing ~/VM (this repo, hidden as
+  # ~/VM/.nixos-gpu-vm, and anything else you put there; features/mac-share).
   # Extra arguments go to steamac-vm, e.g. nix run . -- --cpus 8 --mem 16384
   #
   # The disk is made once (from a rootfs built on the nix-darwin linux-builder) and kept; the

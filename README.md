@@ -22,10 +22,10 @@ Venus needs on 16K-page hosts, and niri as a minimal desktop. OpenGL apps run th
 
 ## Build and run
 
-Clone into `~/VM` (the folder the VM shares; see below), then:
+Clone into `~/VM/.nixos-gpu-vm` (hidden in the folder the VM shares; see below), then:
 
 ```sh
-git clone <this repo> ~/VM/nixos-gpu-vm && cd ~/VM/nixos-gpu-vm
+git clone <this repo> ~/VM/.nixos-gpu-vm && cd ~/VM/.nixos-gpu-vm
 ./build.sh   # fetch steamac at the tested commit, build its macOS host stack, build the guest
 ./run.sh     # boot (10 vCPUs, 8 GB); extra arguments go to the launcher, e.g. ./run.sh --mem 16384
 ```
@@ -39,9 +39,9 @@ resolution gives native pixels. SSH: `ssh -p 2222 <user>@127.0.0.1`.
 
 ## Sharing files
 
-The VM shares one Mac folder, `~/VM`. This checkout lives in it and is bound to `/etc/nixos`;
-anything else you put in `~/VM` shows up in the VM's home as a link of the same name (and
-disappears when you remove it on the Mac).
+The VM shares one Mac folder, `~/VM`. This checkout lives in it, hidden as `.nixos-gpu-vm`, and
+is bound to `/etc/nixos`; anything else you put in `~/VM` shows up in the VM's home as a link of
+the same name (and disappears when you remove it on the Mac). Hidden items aren't linked.
 
 ## Changing the system
 
