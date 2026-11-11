@@ -1,0 +1,56 @@
+virtio-fs (macOS): keep the guest inside the shared directory
+
+The macOS passthrough builds host paths as /.vol/<dev>/<ino>/<name> from the
+names the guest sends, without filtering them, and open_inode drops
+O_NOFOLLOW. A guest that controls its kernel (root) could look up "..", send a
+name with "/" in it, or open a symlink it planted, and so reach any host path
+the launcher's user can. Reject ".", ".." and "/" in every name that becomes a
+host path (name_to_path, and do_unlink's unlinkat), and keep O_NOFOLLOW when
+opening an inode.
+
+Applied by nixos-gpu-vm's build.sh after steamac's libkrun patches.
+
+--- a/src/devices/src/virtio/fs/macos/passthrough.rs
++++ b/src/devices/src/virtio/fs/macos/passthrough.rs
+@@ -159,6 +159,16 @@
+ 
+ fn ebadf() -> io::Error {
+     linux_error(io::Error::from_raw_os_error(libc::EBADF))
++}
++
++/// A name from the guest must be a single component of the shared directory: `.`, `..` or a
++/// `/` would let it address paths outside the share, since the host resolves them as given.
++fn check_name(name: &CStr) -> io::Result<()> {
++    let bytes = name.to_bytes();
++    if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
++        return Err(einval());
++    }
++    Ok(())
+ }
+ 
+ fn einval() -> io::Error {
+@@ -717,6 +727,7 @@
+     }
+ 
+     fn name_to_path(&self, parent: Inode, name: &CStr) -> io::Result<CString> {
++        check_name(name)?;
+         debug!(
+             "name_to_path: parent={} name={}",
+             parent,
+@@ -766,7 +777,7 @@
+             InodeHandle::Path(c_path) => unsafe {
+                 libc::open(
+                     c_path.as_ptr(),
+-                    (flags | libc::O_CLOEXEC) & (!libc::O_NOFOLLOW) & (!libc::O_EXLOCK),
++                    (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) & (!libc::O_EXLOCK),
+                 )
+             },
+             // Check if we have recently unlinked the inode and kept open a file descriptor to it.
+@@ -983,6 +994,7 @@
+         name: &CStr,
+         flags: libc::c_int,
+     ) -> io::Result<()> {
++        check_name(name)?;
+         let ihandle = self.inode_to_handle(parent, true)?;
+ 
+         let (fd, close_fd) = match ihandle {

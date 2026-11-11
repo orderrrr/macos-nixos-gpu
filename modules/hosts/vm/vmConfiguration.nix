@@ -46,12 +46,6 @@ _: {
       nix.settings.build-dir = "/nix/var/nix/builds";
       systemd.tmpfiles.rules = [ "d /nix/var/nix/builds 0755 root root" ];
 
-      # The repo on the Mac (the run app's --share), for nixos-rebuild in the guest.
-      fileSystems."/etc/nixos" = {
-        device = "macshare";
-        fsType = "virtiofs";
-      };
-
       # First boot: register the image's store paths, as the sd-image module does.
       boot.postBootCommands = ''
         if [ -f /disk/nix-path-registration ]; then

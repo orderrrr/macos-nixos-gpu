@@ -22,20 +22,42 @@ Venus needs on 16K-page hosts, and niri as a minimal desktop. OpenGL apps run th
 
 ## Build and run
 
+Clone into `~/VM` (the folder the VM shares; see below), then:
+
 ```sh
+git clone <this repo> ~/VM/nixos-gpu-vm && cd ~/VM/nixos-gpu-vm
 ./build.sh   # fetch steamac at the tested commit, build its macOS host stack, build the guest
-./run.sh     # boot; extra arguments go to the launcher, e.g. ./run.sh --cpus 8 --mem 16384
+./run.sh     # boot (10 vCPUs, 8 GB); extra arguments go to the launcher, e.g. ./run.sh --mem 16384
 ```
+
+`build.sh` also applies this repo's libkrun patch (`modules/hosts/vm/libkrun`) to steamac's.
 
 steamac and the VM's disk live in `~/.local/share/nixos-gpu-vm/`. The disk is made once and
 kept, so the guest's home survives changes. In the launcher, Ctrl+Cmd+G grabs the pointer
 (Ctrl+Option releases) and Ctrl+Cmd+F toggles fullscreen; Settings (Cmd+,) > Display > Retina
 resolution gives native pixels. SSH: `ssh -p 2222 <user>@127.0.0.1`.
 
+## Sharing files
+
+The VM shares one Mac folder, `~/VM`. This checkout lives in it and is bound to `/etc/nixos`;
+anything else you put in `~/VM` shows up in the VM's home as a link of the same name (and
+disappears when you remove it on the Mac).
+
+## sudo password
+
+sudo asks for a password, whose hash lives outside the repo in `/persist/passwords/<user>`.
+Make it once, from the Mac (root logs in with your SSH key only):
+
+```sh
+ssh -t -p 2222 root@127.0.0.1 'install -d -m 700 /persist/passwords &&
+  nix run nixpkgs#mkpasswd > /persist/passwords/<user> && chmod 600 /persist/passwords/<user>'
+```
+
+Then reboot the VM (or rebuild) so the account picks it up.
+
 ## Changing the system
 
-This checkout is shared into the guest at `/etc/nixos` (virtio-fs). Edit it from either side,
-then in the guest:
+Edit this checkout from either side, then in the guest:
 
 ```sh
 sudo nixos-rebuild switch --flake /etc/nixos#vm
@@ -59,8 +81,10 @@ the VM uses; `meta.nix` holds the user's name and email.
 
 - `modules/system/core/kernel.config` is steamac's kernel config resolved for one kernel
   version. Regenerate it when nixpkgs moves `linux_latest` (see the comment in `boot.nix`).
-- virtio-fs does not confine the guest to the shared folder: root in the guest can read what
-  your Mac user can.
+- virtio-fs on macOS doesn't confine the guest to the shared folder by itself: root in the
+  guest (it controls the kernel) could reach any path your Mac user can. The libkrun patch here
+  rejects `.`, `..` and `/` in names and keeps symlinks unfollowed, and sudo needs a password;
+  still, share only what you want the VM to see.
 
 ## Licences
 

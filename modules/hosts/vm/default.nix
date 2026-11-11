@@ -15,7 +15,8 @@
       darkMode
       niri
       noctalia
-      mac-clipboard
+      steamac-agent
+      mac-share
       ghostty
       zen
       development
@@ -23,7 +24,8 @@
     ];
   };
 
-  # `nix run`: boot the guest in steamac's launcher, with this repo shared in as /etc/nixos.
+  # `nix run`: boot the guest in steamac's launcher, sharing ~/VM (this repo and anything else
+  # you put there; features/mac-share).
   # Extra arguments go to steamac-vm, e.g. nix run . -- --cpus 8 --mem 16384
   #
   # The disk is made once (from a rootfs built on the nix-darwin linux-builder) and kept; the
@@ -38,7 +40,7 @@
       apps.default.program = pkgs.writeShellScriptBin "nixos-gpu-vm" ''
         set -eu
         bundle=${build.bundle}
-        repo=''${NIXOS_GPU_VM:-$HOME/dev/prs/nixos-gpu-vm}
+        share=''${NIXOS_GPU_VM_SHARE:-$HOME/VM}
         state=''${XDG_DATA_HOME:-$HOME/.local/share}/nixos-gpu-vm
         steamac=$state/steamac # fetched and built by build.sh
         disk=$state/disk.img
@@ -62,7 +64,7 @@
           --initrd "$bundle/initrd" \
           --cmdline "$(cat "$bundle/cmdline")" \
           --disk "$disk" \
-          --share "$repo" \
+          --share "$share" \
           --no-share-library \
           "$@"
       '';
