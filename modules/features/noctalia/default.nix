@@ -23,21 +23,15 @@
     {
       programs.noctalia = {
         enable = true;
-        # Upstream 5.4.1 can destroy a wl_surface while zink still presents to it (the patch says
-        # why); with it, Noctalia can draw on the GPU again.
+        # Upstream 5.4.1 can destroy a wl_surface while zink still presents to it, and niri then
+        # disconnects Noctalia (the bar vanished on every few Mod+D). The patch waits for that
+        # present first (it says how), so Noctalia draws on the GPU.
         package = pkgs.noctalia.overrideAttrs (old: {
           patches = (old.patches or [ ]) ++ [
             ./0001-finish-gl-work-before-the-wl_surface-is-destroyed.patch
           ];
         });
         systemd.enable = true; # started with niri's graphical-session.target
-      };
-      # Draw with software GL (llvmpipe), not zink: zink presents through Venus's Vulkan WSI,
-      # which can still attach a frame after Noctalia destroys a surface (the launcher on close),
-      # and niri then disconnects it ("invalid object"). Its surfaces are cheap to draw on the CPU.
-      systemd.user.services.noctalia = {
-        environment.LIBGL_ALWAYS_SOFTWARE = "1";
-        serviceConfig.UnsetEnvironment = [ "MESA_LOADER_DRIVER_OVERRIDE" ];
       };
       systemd.user.tmpfiles.rules = [
         "d %h/.config/noctalia"

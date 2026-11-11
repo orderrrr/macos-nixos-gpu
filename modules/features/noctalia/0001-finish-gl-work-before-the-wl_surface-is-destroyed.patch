@@ -1,6 +1,17 @@
 --- a/src/render/backend/gles_render_backend.cpp
 +++ b/src/render/backend/gles_render_backend.cpp
-@@ -214,6 +214,16 @@
+@@ -174,8 +174,8 @@
+ 
+   class GlesSurfaceTarget final : public RenderSurfaceTarget {
+   public:
+-    GlesSurfaceTarget(EGLDisplay display, EGLConfig config, wl_surface* surface)
+-        : m_display(display), m_config(config), m_wlSurface(surface) {}
++    GlesSurfaceTarget(EGLDisplay display, EGLConfig config, EGLContext context, wl_surface* surface)
++        : m_display(display), m_context(context), m_config(config), m_wlSurface(surface) {}
+     ~GlesSurfaceTarget() override { destroy(); }
+ 
+     GlesSurfaceTarget(const GlesSurfaceTarget&) = delete;
+@@ -214,6 +214,17 @@
  
      void destroy() override {
        if (m_surface != EGL_NO_SURFACE) {
@@ -8,12 +19,30 @@
 +        // can reach the wl_surface after eglDestroySurface returns, and the caller destroys that
 +        // surface next, which the compositor rejects as a request on an invalid object. glFinish
 +        // alone returns at once when nothing was drawn since the swap, so queue a clear of the
-+        // (about to be discarded) surface behind that present and wait for it.
-+        const EGLContext context = eglGetCurrentContext();
-+        if (context != EGL_NO_CONTEXT && eglMakeCurrent(m_display, m_surface, m_surface, context) == EGL_TRUE) {
++        // (about to be discarded) surface behind that present and wait for it: zink submits and
++        // presents on one ordered queue. The renderer's own context is used, so this never
++        // depends on what happens to be current.
++        if (m_context != EGL_NO_CONTEXT && eglMakeCurrent(m_display, m_surface, m_surface, m_context) == EGL_TRUE) {
 +          glClear(GL_COLOR_BUFFER_BIT);
 +          glFinish();
 +        }
          if (isCurrentEglSurface(m_display, m_surface)) {
            const EGLContext currentContext = eglGetCurrentContext();
            if (currentContext != EGL_NO_CONTEXT
+@@ -245,6 +256,7 @@
+ 
+   private:
+     EGLDisplay m_display = EGL_NO_DISPLAY;
++    EGLContext m_context = EGL_NO_CONTEXT;
+     EGLConfig m_config = nullptr;
+     wl_surface* m_wlSurface = nullptr;
+     wl_egl_window* m_window = nullptr;
+@@ -431,7 +443,7 @@
+ }
+ 
+ std::unique_ptr<RenderSurfaceTarget> GlesRenderBackend::createSurfaceTarget(wl_surface* surface) {
+-  return std::make_unique<GlesSurfaceTarget>(m_display, m_config, surface);
++  return std::make_unique<GlesSurfaceTarget>(m_display, m_config, m_context, surface);
+ }
+ 
+ std::unique_ptr<RenderFramebuffer> GlesRenderBackend::createFramebuffer(std::uint32_t width, std::uint32_t height) {
