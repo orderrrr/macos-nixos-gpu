@@ -27,6 +27,8 @@ Bluetooth and sound devices, brightness and time zone (see "The Mac's helpers").
 - Homebrew and rustup (steamac's host build uses them)
 - Nix with an aarch64-linux builder. With nix-darwin, import this flake's
   `modules.darwin.vmHost`, which sets up `nix.linux-builder` sized for the kernel and Mesa builds.
+  It doesn't start at boot (16 GB idle otherwise): `sudo launchctl kickstart system/org.nixos.linux-builder`
+  before building, `sudo launchctl kill TERM system/org.nixos.linux-builder` after.
 
 ## Build and run
 
