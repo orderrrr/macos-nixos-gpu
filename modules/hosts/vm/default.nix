@@ -27,6 +27,7 @@
       btop
       zen
       development
+      ssh
       impermanence
     ];
   };
