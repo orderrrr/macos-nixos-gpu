@@ -105,6 +105,9 @@ the VM uses; `meta.nix` holds the user's name and email.
 - `modules/system/core/kernel.config` is steamac's kernel config resolved for one kernel
   version. Regenerate it when nixpkgs moves `linux_latest` (see the comment in `boot.nix`).
 - No hardware video decoding: libkrun has no virgl OpenGL, which omacvm's decoding runs through.
+- Ghostty's blinking cursor costs about 6% of a Mac core while a Ghostty window is on screen
+  (the idle VM: about 3% without it, 9% with it): each blink redraws the window through the GPU.
+  `cursor-style-blink = false` in `modules/features/ghostty/config/config` removes it.
 - virtio-fs on macOS doesn't confine the guest to the shared folder by itself: root in the
   guest (it controls the kernel) could reach any path your Mac user can. The libkrun patch here
   rejects `.`, `..` and `/` in names and keeps symlinks unfollowed; still, share only what you
@@ -115,8 +118,9 @@ the VM uses; `meta.nix` holds the user's name and email.
 - Our own guest protocol and agents for battery, media, camera and Touch ID, instead of omacvm's.
 - Send the notch geometry live instead of on the kernel command line, so the bar follows a
   display change and full screen entered later also covers the notch.
+- Try Touch ID with a real finger (polkit: `systemctl restart systemd-timesyncd` without sudo);
+  decide on `security.polkit.enablePkexecWrapper` for `pkexec`.
 - Benchmark a 250 Hz tick against 1000 Hz (snappiness and idle power) before switching.
-- Find what keeps the idle VM at about 9% CPU (likely a guest app drawing at idle).
 - `modules/hosts/vm/libkrun/shelved/9902-*.patch` (sweeping libkrun's own view of guest RAM) is
   not applied: it only lowers Activity Monitor's figure by about 0.5 GB, the Mac gets no memory
   back, and it can stall device threads for a few ms every 5 minutes.

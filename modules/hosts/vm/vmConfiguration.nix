@@ -111,6 +111,15 @@ _: {
       # A 10-way C++ build once ran the VM out of memory and the kernel killed niri: compressed swap
       # in RAM gives headroom before anything is killed, and in-VM builds use at most 4 cores.
       zramSwap.enable = true;
+      # Past what zram can hold: a swap file on the disk (/ is tmpfs), used only once zram is
+      # full (zram's priority is 5).
+      swapDevices = [
+        {
+          device = "/disk/swapfile";
+          size = 8 * 1024;
+          priority = 0;
+        }
+      ];
       nix.settings = {
         cores = 4;
         max-jobs = 1;

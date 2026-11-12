@@ -34,6 +34,8 @@
   # `nix run`: boot the guest in steamac's launcher, sharing ~/VM (this repo, hidden as
   # ~/VM/.nixos-gpu-vm, and anything else you put there; features/mac-share).
   # Extra arguments go to steamac-vm, e.g. nix run . -- --cpus 8 --mem 16384
+  # The mouse is captured while the window is in front, so the guest cursor also reaches the
+  # strip beside the notch (Ctrl+Option releases it; launcher patch 0004).
   #
   # The disk is made once (from a rootfs built on the nix-darwin linux-builder) and kept; the
   # guest changes itself with `sudo nixos-rebuild switch --flake /etc/nixos#vm` like any NixOS.
@@ -73,6 +75,7 @@
           --disk "$disk" \
           --share "$share" \
           --no-share-library \
+          --mouse capture \
           "$@"
       '';
     };

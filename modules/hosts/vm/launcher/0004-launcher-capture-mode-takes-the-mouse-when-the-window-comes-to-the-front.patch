@@ -1,0 +1,16 @@
+--- a/host/launcher/Sources/steamac-vm/Window.swift
++++ b/host/launcher/Sources/steamac-vm/Window.swift
+@@ -648,7 +648,12 @@
+     }
+ 
+     func windowDidResignKey(_ notification: Notification) { releaseAll() }
+-    func windowDidBecomeKey(_ notification: Notification) { refreshHostCursor() }
++    func windowDidBecomeKey(_ notification: Notification) {
++        refreshHostCursor()
++        // --mouse capture: take the mouse as soon as the window is in front, as OmacVM.app does,
++        // instead of on the next click (resigning key releases it again).
++        if mouseMode == .capture { grabPointer() }
++    }
+     func windowDidMiniaturize(_ notification: Notification) { releaseAll() }
+ 
+     // MARK: keyboard
