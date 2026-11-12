@@ -1,0 +1,535 @@
+virtio-balloon (macOS): count guest RAM once, libkrun's own view swept
+
+macOS charges a page to the footprint once for every mapping that touched it: through the
+hypervisor's map when the guest touches it, and again through libkrun's own mapping of guest
+RAM once a device thread did (virtio-blk and virtio-fs reads and writes, GPU transfers, vsock
+and net buffers). Both map the same VM objects, so the second charge is no memory, but
+Activity Monitor shows it.
+
+A thread remaps libkrun's view of guest RAM over itself (mach_vm_remap, copy=FALSE,
+VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE), one 128 MB chunk at a time, 20 ms apart: the same
+objects at the same offsets, without libkrun's page table entries. A pass a minute after the
+balloon starts, then every 5 minutes, skipped while the footprint grew less than 64 MB since
+the last one, twice in a row at most.
+
+Device threads touch guest RAM with no lock. XNU deletes and enters the chunk's entries under
+the map's write lock, so a thread that touches the chunk meanwhile faults, waits and finds the
+same page. A chunk is remapped only when every entry is true shared, has an object, is
+readable and writable and not wired; give_back holds a lock the sweep takes per chunk; after
+each remap the entries are read again, and other objects, offsets or a hole are mapped back
+from a spare mapping made before the remap and stop the sweep for the run (libkrun aborts if
+that fails too). Precondition: nothing kernel-wires guest RAM (disks are files, not
+/dev/rdisk devices).
+
+Design from OmacVM's QEMU patch (qemu-hvf-own-view-sweep.patch, MIT), without its trial on
+scratch memory.
+Applied by nixos-gpu-vm's build.sh after 9901.
+
+diff --git a/src/devices/src/virtio/balloon/device.rs b/src/devices/src/virtio/balloon/device.rs
+index 802d9ab..8ca8f51 100644
+--- a/src/devices/src/virtio/balloon/device.rs
++++ b/src/devices/src/virtio/balloon/device.rs
+@@ -204,6 +204,19 @@ impl VirtioDevice for Balloon {
+             return Err(ActivateError::BadActivate);
+         }
+ 
++        // The sweep's guest RAM: the region that ends at ram_end, not the shared memory windows.
++        #[cfg(target_os = "macos")]
++        {
++            use vm_memory::{GuestAddress, GuestMemoryRegion};
++            if let Some(ram) = mem
++                .find_region(GuestAddress(self.ram_end - 1))
++                .filter(|r| r.start_addr().raw_value() + r.len() == self.ram_end)
++            {
++                let host = mem.get_host_address(ram.start_addr()).unwrap();
++                self.reclaim.sweep(host, ram.len() as usize);
++            }
++        }
++
+         self.queues = Some(queues);
+         self.device_state = DeviceState::Activated(mem, interrupt);
+ 
+diff --git a/src/devices/src/virtio/balloon/mod.rs b/src/devices/src/virtio/balloon/mod.rs
+index c05370f..464f2f4 100644
+--- a/src/devices/src/virtio/balloon/mod.rs
++++ b/src/devices/src/virtio/balloon/mod.rs
+@@ -2,6 +2,8 @@ mod device;
+ mod event_handler;
+ #[cfg(target_os = "macos")]
+ mod reclaim;
++#[cfg(target_os = "macos")]
++mod sweep;
+ 
+ pub use self::defs::uapi::VIRTIO_ID_BALLOON as TYPE_BALLOON;
+ pub use self::device::Balloon;
+diff --git a/src/devices/src/virtio/balloon/reclaim.rs b/src/devices/src/virtio/balloon/reclaim.rs
+index e792897..8fc7748 100644
+--- a/src/devices/src/virtio/balloon/reclaim.rs
++++ b/src/devices/src/virtio/balloon/reclaim.rs
+@@ -13,6 +13,7 @@
+ //! Design from OmacVM's QEMU patches (qemu-hvf-free-page-reclaim*.patch, MIT).
+ 
+ use std::sync::mpsc::{channel, Receiver, Sender};
++use std::sync::{Arc, Mutex};
+ use std::thread;
+ use std::time::Duration;
+ 
+@@ -20,16 +21,18 @@ use hvf::bindings::{
+     hv_vm_map, hv_vm_unmap, HV_MEMORY_EXEC, HV_MEMORY_READ, HV_MEMORY_WRITE, HV_SUCCESS,
+ };
+ 
+-type MachPort = u32;
++use super::sweep;
+ 
+-const KERN_SUCCESS: i32 = 0;
++pub(super) type MachPort = u32;
++
++pub(super) const KERN_SUCCESS: i32 = 0;
+ const VM_FLAGS_ANYWHERE: i32 = 1;
+-const VM_INHERIT_NONE: u32 = 2;
++pub(super) const VM_INHERIT_NONE: u32 = 2;
+ 
+ extern "C" {
+-    static mach_task_self_: MachPort;
++    pub(super) static mach_task_self_: MachPort;
+ 
+-    fn mach_vm_remap(
++    pub(super) fn mach_vm_remap(
+         target_task: MachPort,
+         target_address: *mut u64,
+         size: u64,
+@@ -52,6 +55,10 @@ struct Aside {
+ 
+ pub(crate) struct Reclaim {
+     worker: Sender<Aside>,
++    /// Held while guest RAM's map entries change here, and by the sweep for each chunk: a chunk
++    /// never meets a range being replaced.
++    changes: Arc<Mutex<()>>,
++    sweeping: bool,
+ }
+ 
+ impl Reclaim {
+@@ -61,7 +68,19 @@ impl Reclaim {
+             .name("balloon reclaim".into())
+             .spawn(move || release_worker(ranges))
+             .expect("failed to spawn the balloon reclaim thread");
+-        Reclaim { worker }
++        Reclaim {
++            worker,
++            changes: Arc::new(Mutex::new(())),
++            sweeping: false,
++        }
++    }
++
++    /// Starts the own-view sweep (sweep.rs) of guest RAM, len bytes mapped at host, once.
++    pub(crate) fn sweep(&mut self, host: *mut u8, len: usize) {
++        if !self.sweeping {
++            self.sweeping = true;
++            sweep::start(host as u64, len as u64, self.changes.clone());
++        }
+     }
+ 
+     /// Replaces the reported range [gpa, gpa + len), mapped at host, with fresh memory. The
+@@ -71,6 +90,7 @@ impl Reclaim {
+         if len == 0 || (gpa as usize | host as usize | len) % page != 0 {
+             return;
+         }
++        let _changes = self.changes.lock().unwrap();
+ 
+         // SAFETY: hv_vm_unmap only touches the hypervisor's map of this guest range.
+         if unsafe { hv_vm_unmap(gpa, len) } != HV_SUCCESS {
+diff --git a/src/devices/src/virtio/balloon/sweep.rs b/src/devices/src/virtio/balloon/sweep.rs
+new file mode 100644
+index 0000000..c38e499
+--- /dev/null
++++ b/src/devices/src/virtio/balloon/sweep.rs
+@@ -0,0 +1,389 @@
++//! macOS: libkrun's own view of guest RAM, counted once in the VM's footprint.
++//!
++//! macOS charges a page to a process's footprint once for every mapping that touched it: through
++//! the hypervisor's map when the guest touches it, and again through libkrun's own mapping when a
++//! device thread did (virtio-blk and virtio-fs reads and writes, GPU transfers, vsock and net
++//! buffers). Both map the same VM objects (hv_vm_map makes libkrun's entries true shared), so the
++//! second charge is no memory, but Activity Monitor shows it.
++//!
++//! A pass remaps libkrun's view over itself, one 128 MB chunk (one XNU object) at a time:
++//! mach_vm_remap, copy=FALSE, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE. The same objects at the same
++//! offsets, without libkrun's page table entries, so their charges go. No page is touched, copied
++//! or moved; a device thread's next touch faults the page in again.
++//!
++//! Device threads touch guest RAM with no lock, so the remap must never show them a missing or
++//! other page. XNU deletes the old entries and enters the new ones under the map's write lock: a
++//! thread that touches the chunk meanwhile faults, waits for that lock and then finds the same
++//! object at the same offset, the same page (so do the kernel's copyin and copyout for read and
++//! write, and pages wired for F_NOCACHE or IOKit stay where they are). That holds when:
++//! - every entry of the chunk is true shared (copy=FALSE shares it instead of shadowing it), has
++//!   an object, is readable and writable and not user wired: checked before each chunk, else the
++//!   chunk is left as it is;
++//! - nothing wires the chunk's entries in the kernel (mlock, or physio's vslock for a raw
++//!   /dev/rdisk disk): the delete would wait for it with the map unlocked and the earlier entries
++//!   gone. libkrun wires none, as long as its disks are files;
++//! - nothing else changes the chunk's entries meanwhile: give_back takes the same lock.
++//!
++//! Nothing on the Mac promises the first, so after each remap the entries are read again. Other
++//! objects or offsets, or a hole, and the chunk is mapped back from a spare mapping made just
++//! before the remap, and the sweep stops for the run. If even that fails libkrun stops: its
++//! devices would read and write memory the guest does not see.
++//!
++//! Design from OmacVM's QEMU patch (qemu-hvf-own-view-sweep.patch, MIT), without its trial on
++//! scratch memory: the checks around each chunk are what keep a device thread safe.
++
++use std::sync::{Arc, Mutex};
++use std::thread;
++use std::time::Duration;
++
++use super::reclaim::{mach_task_self_, mach_vm_remap, MachPort, KERN_SUCCESS, VM_INHERIT_NONE};
++
++const CHUNK: u64 = 128 << 20;
++const GAP: Duration = Duration::from_millis(20);
++const FIRST: Duration = Duration::from_secs(60);
++const PERIOD: Duration = Duration::from_secs(300);
++/// A pass is skipped while the footprint grew less than this since the last one...
++const GROWTH: u64 = 64 << 20;
++/// ...twice in a row at most: free page reports shrink the footprint while device threads grow
++/// the second charge.
++const SKIPS: u32 = 2;
++
++const VM_FLAGS_FIXED: i32 = 0;
++const VM_FLAGS_ANYWHERE: i32 = 1;
++const VM_FLAGS_OVERWRITE: i32 = 0x4000;
++const VM_PROT_READ_WRITE: i32 = 1 | 2;
++const SM_COW: u8 = 1;
++const SM_EMPTY: u8 = 3;
++const SM_TRUESHARED: u8 = 5;
++const VM_REGION_SUBMAP_SHORT_INFO_COUNT_64: u32 = 12;
++
++/// vm_region_submap_short_info_data_64_t (mach/vm_region.h, pack 4). The short info reads the
++/// map entries only, no page.
++#[repr(C, packed(4))]
++#[derive(Clone, Copy, Default)]
++struct ShortInfo {
++    protection: i32,
++    max_protection: i32,
++    inheritance: u32,
++    offset: u64,
++    user_tag: u32,
++    ref_count: u32,
++    shadow_depth: u16,
++    external_pager: u8,
++    share_mode: u8,
++    is_submap: i32,
++    behavior: i32,
++    object_id: u32,
++    user_wired_count: u16,
++}
++
++const _: () = assert!(std::mem::size_of::<ShortInfo>() == 48);
++
++extern "C" {
++    fn mach_vm_region_recurse(
++        target_task: MachPort,
++        address: *mut u64,
++        size: *mut u64,
++        nesting_depth: *mut u32,
++        info: *mut ShortInfo,
++        info_count: *mut u32,
++    ) -> i32;
++
++    fn mach_vm_deallocate(target_task: MachPort, address: u64, size: u64) -> i32;
++}
++
++/// A piece of the view: one object from an offset on.
++#[derive(PartialEq)]
++struct Run {
++    start: u64,
++    end: u64,
++    object: u32,
++    offset: u64,
++}
++
++/// What a chunk came to.
++enum Chunk {
++    Remapped,
++    /// Not as the remap needs it; left as it is.
++    Left(String),
++    /// The view is as it was, but the sweep must not go on.
++    Stop(String),
++}
++
++/// Starts the sweep of guest RAM, len bytes mapped at host. lock: held by whatever else changes
++/// guest RAM's entries (give_back).
++pub(crate) fn start(host: u64, len: u64, lock: Arc<Mutex<()>>) {
++    info!(
++        "balloon: own-view sweep on for {} MB of guest RAM, every {} s",
++        len >> 20,
++        PERIOD.as_secs()
++    );
++    thread::Builder::new()
++        .name("balloon sweep".into())
++        .spawn(move || run(host, len, &lock))
++        .expect("failed to spawn the balloon sweep thread");
++}
++
++fn run(host: u64, len: u64, lock: &Mutex<()>) {
++    thread::sleep(FIRST);
++    let mut after_last: Option<u64> = None;
++    let mut skipped = 0;
++    loop {
++        let now = footprint();
++        let idle = after_last.is_some_and(|f| now < f.saturating_add(GROWTH));
++        if idle && skipped < SKIPS {
++            skipped += 1;
++        } else {
++            skipped = 0;
++            if let Err(why) = pass(host, len, lock) {
++                error!("balloon: own-view sweep stopped for this run: {why}");
++                return;
++            }
++            let after = footprint();
++            info!(
++                "balloon: own-view sweep: footprint {} MB, {} MB before the pass",
++                after >> 20,
++                now >> 20
++            );
++            after_last = Some(after);
++        }
++        thread::sleep(PERIOD);
++    }
++}
++
++/// One pass over guest RAM, a chunk at a time, GAP apart so give_back waits one chunk at most.
++fn pass(host: u64, len: u64, lock: &Mutex<()>) -> Result<(), String> {
++    let end = host + len;
++    let mut at = host;
++    let mut left = 0;
++    while at < end {
++        let n = CHUNK.min(end - at);
++        let chunk = {
++            let _changes = lock.lock().unwrap();
++            remap_chunk(at, n)
++        };
++        match chunk {
++            Chunk::Remapped => {}
++            Chunk::Left(why) => {
++                if left == 0 {
++                    warn!(
++                        "balloon: own-view sweep left the chunk at +{} MB as it is: {why}",
++                        (at - host) >> 20
++                    );
++                }
++                left += 1;
++            }
++            Chunk::Stop(why) => return Err(format!("at +{} MB: {why}", (at - host) >> 20)),
++        }
++        at += n;
++        thread::sleep(GAP);
++    }
++    if left > 1 {
++        warn!("balloon: own-view sweep left {left} chunks as they are");
++    }
++    Ok(())
++}
++
++/// Remaps [at, at + len) of the view over itself, as the module comment says.
++fn remap_chunk(at: u64, len: u64) -> Chunk {
++    let (runs, inheritance) = match entries(at, len, true) {
++        Ok(e) => e,
++        Err(why) => return Chunk::Left(why),
++    };
++
++    // The spare: one more mapping of the same objects, to map back from. No page table entry.
++    let mut spare = 0;
++    if remap(&mut spare, len, VM_FLAGS_ANYWHERE, at, VM_INHERIT_NONE) != KERN_SUCCESS {
++        return Chunk::Stop("no spare mapping".into());
++    }
++    let spare_same = same(spare, at, len, &runs);
++    let view_same = same(at, at, len, &runs);
++    let chunk = if !view_same {
++        // Making the spare shadowed the view: the remap's copy=FALSE does not share here.
++        if !spare_same {
++            lost(at, "making a spare changed the view and the spare");
++        }
++        map_back(at, len, spare, inheritance, &runs);
++        Chunk::Stop("making a spare changed the view; mapped back".into())
++    } else if !spare_same {
++        Chunk::Stop("the spare is not the same memory".into())
++    } else {
++        let mut to = at;
++        let kr = remap(&mut to, len, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, at, inheritance);
++        // At once: a device thread may be reading or writing the chunk.
++        if same(at, at, len, &runs) {
++            if kr == KERN_SUCCESS && to == at {
++                Chunk::Remapped
++            } else {
++                Chunk::Stop(format!("the remap failed ({kr}), the view as it was"))
++            }
++        } else {
++            map_back(at, len, spare, inheritance, &runs);
++            Chunk::Stop(format!("the remap ({kr}) changed the view; mapped back"))
++        }
++    };
++    // SAFETY: the spare is our own mapping; nothing refers to it.
++    unsafe { mach_vm_deallocate(mach_task_self_, spare, len) };
++    chunk
++}
++
++/// The view of [at, at + len) from the spare, piece by piece: over what is mapped there, into
++/// what is not (a delete across a hole is refused). Twice at most, then libkrun stops.
++fn map_back(at: u64, len: u64, spare: u64, inheritance: u32, runs: &[Run]) {
++    for _ in 0..2 {
++        let end = at + len;
++        let mut a = at;
++        while a < end {
++            let (start, size) = region(a).map_or((end, 0), |(s, n, _)| (s.min(end), n));
++            let (stop, flags) = if start > a {
++                (start, VM_FLAGS_FIXED)
++            } else {
++                ((start + size).min(end), VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)
++            };
++            let mut to = a;
++            remap(&mut to, stop - a, flags, spare + (a - at), inheritance);
++            a = stop;
++        }
++        if same(at, at, len, runs) {
++            return;
++        }
++    }
++    lost(at, "the view could not be mapped back");
++}
++
++/// Stops libkrun: a panic would end only this thread (release builds unwind).
++fn lost(at: u64, why: &str) -> ! {
++    error!(
++        "balloon: own-view sweep at {at:#x}: {why}; libkrun's devices would no longer see \
++         the guest's memory"
++    );
++    std::process::abort();
++}
++
++/// Does [at, at + len) map runs (read at at0, each moved by at - at0), readable and writable?
++fn same(at: u64, at0: u64, len: u64, runs: &[Run]) -> bool {
++    let Ok((now, _)) = entries(at, len, false) else {
++        return false;
++    };
++    now.len() == runs.len()
++        && now.iter().zip(runs).all(|(n, r)| {
++            n.start == r.start - at0 + at
++                && n.end == r.end - at0 + at
++                && n.object == r.object
++                && n.offset == r.offset
++        })
++}
++
++/// [at, at + len) as runs (one object's adjacent pieces as one) and its inheritance. Before a
++/// remap every entry must be as the module comment says; after it, and in a spare, any share
++/// mode but copy-on-write or empty passes: the kernel reads an object's reference count one low
++/// while one of its pages is paged, and true shared then reads private.
++fn entries(at: u64, len: u64, before: bool) -> Result<(Vec<Run>, u32), String> {
++    let end = at + len;
++    let mut runs: Vec<Run> = Vec::new();
++    let mut inheritance = 0;
++    let mut a = at;
++    while a < end {
++        let Some((start, size, info)) = region(a).filter(|(s, _, _)| *s <= a) else {
++            return Err(format!("nothing mapped at {a:#x}"));
++        };
++        let shared = if before {
++            info.share_mode == SM_TRUESHARED && info.user_wired_count == 0
++        } else {
++            info.share_mode != SM_COW && info.share_mode != SM_EMPTY
++        };
++        if info.is_submap != 0
++            || !shared
++            || info.object_id == 0
++            || info.protection & VM_PROT_READ_WRITE != VM_PROT_READ_WRITE
++        {
++            let (mode, object, prot, wired) = (
++                info.share_mode,
++                info.object_id != 0,
++                info.protection,
++                info.user_wired_count,
++            );
++            return Err(format!(
++                "the entry at {a:#x} is not shared with the guest as it must be \
++                 (share mode {mode}, object {object}, protection {prot}, wired {wired})"
++            ));
++        }
++        if a == at {
++            inheritance = info.inheritance;
++        } else if before && info.inheritance != inheritance {
++            return Err("its entries are inherited differently".into());
++        }
++        let offset = info.offset + (a - start);
++        let stop = (start + size).min(end);
++        match runs.last_mut() {
++            Some(r) if r.object == info.object_id && r.offset + (r.end - r.start) == offset => {
++                r.end = stop
++            }
++            _ => runs.push(Run {
++                start: a,
++                end: stop,
++                object: info.object_id,
++                offset,
++            }),
++        }
++        a = stop;
++    }
++    Ok((runs, inheritance))
++}
++
++/// The map entry at or after addr: its start, size and short info.
++fn region(addr: u64) -> Option<(u64, u64, ShortInfo)> {
++    let (mut start, mut size, mut depth) = (addr, 0, 0);
++    let mut info = ShortInfo::default();
++    let mut count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
++    // SAFETY: info has room for count ints.
++    let kr = unsafe {
++        mach_vm_region_recurse(
++            mach_task_self_,
++            &mut start,
++            &mut size,
++            &mut depth,
++            &mut info,
++            &mut count,
++        )
++    };
++    (kr == KERN_SUCCESS).then_some((start, size, info))
++}
++
++/// mach_vm_remap of our own src, copy=FALSE: the same objects, no page touched.
++fn remap(to: &mut u64, len: u64, flags: i32, src: u64, inheritance: u32) -> i32 {
++    let (mut cur, mut max) = (0, 0);
++    // SAFETY: only remaps guest RAM or its spare over itself, or into free address space.
++    unsafe {
++        mach_vm_remap(
++            mach_task_self_,
++            to,
++            len,
++            0,
++            flags,
++            mach_task_self_,
++            src,
++            0,
++            &mut cur,
++            &mut max,
++            inheritance,
++        )
++    }
++}
++
++fn footprint() -> u64 {
++    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
++    // SAFETY: info is a rusage_info_v2, the flavor asked for.
++    let ok = unsafe {
++        libc::proc_pid_rusage(
++            libc::getpid(),
++            libc::RUSAGE_INFO_V2,
++            &mut info as *mut _ as *mut libc::rusage_info_t,
++        )
++    } == 0;
++    if ok {
++        info.ri_phys_footprint
++    } else {
++        0
++    }
++}

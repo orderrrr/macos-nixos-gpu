@@ -110,6 +110,17 @@ the VM uses; `meta.nix` holds the user's name and email.
   rejects `.`, `..` and `/` in names and keeps symlinks unfollowed; still, share only what you
   want the VM to see (sudo in the guest needs no password).
 
+## To do
+
+- Our own guest protocol and agents for battery, media, camera and Touch ID, instead of omacvm's.
+- Send the notch geometry live instead of on the kernel command line, so the bar follows a
+  display change and full screen entered later also covers the notch.
+- Benchmark a 250 Hz tick against 1000 Hz (snappiness and idle power) before switching.
+- Find what keeps the idle VM at about 9% CPU (likely a guest app drawing at idle).
+- `modules/hosts/vm/libkrun/shelved/9902-*.patch` (sweeping libkrun's own view of guest RAM) is
+  not applied: it only lowers Activity Monitor's figure by about 0.5 GB, the Mac gets no memory
+  back, and it can stall device threads for a few ms every 5 minutes.
+
 ## Licences
 
 Files from steamac and omacvm keep their licences; see `NOTICE` and `LICENSES/`.
